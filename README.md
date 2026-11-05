@@ -85,9 +85,9 @@ no secrets.
 
 ## How it differs
 
-Nothing shipped today uses an **agent runtime as the orchestrator brain over
-many external harnesses**. The landscape splits into four groups, and
-ao-bridge sits in the gap between them:
+Almost nothing ships an **agent runtime as the orchestrator brain over many
+external harnesses** — the one exception stops at chat tools (below). The
+landscape splits into five groups, and ao-bridge sits in the gap between them:
 
 | Category | Projects | Why it's not this |
 |---|---|---|
@@ -95,6 +95,17 @@ ao-bridge sits in the gap between them:
 | Multi-harness orchestrators with Hermes as a worker | mco, awslabs cli-agent-orchestrator, Agentainer, bernstein | Hermes is **one CLI they drive** — Hermes never drives the fleet |
 | Standalone fleet apps, human-conducted | Paseo, agetor, Hydra, multiagents | The **human is the conductor**; no agent runtime sits in the loop |
 | Agent-driven via CLI skill | **Orca** (stablyai/orca) | See below — closest, but the agent only reaches it by shelling out |
+| Agent tools for AO, chat-only | **hermes-ao** (illegalcall/hermes-plugin-agent-orchestrator, by the AO vendor) | Real: 17 agent tools (spawn/send/kill/issues/PRs) so Hermes can conduct AO from chat. But it has **no UI** — the human's only window is chat text — and it shells the `ao` CLI per call (`AO_CWD`, subprocess timeouts) rather than the daemon REST. Last updated April 2026. |
+
+**On hermes-ao:** it proves the demand for Hermes-conducts-AO and deserves credit —
+it's the AO vendor's own tool plugin. ao-bridge is the layer it doesn't have:
+the **visual board**. Where hermes-ao turns the conversation into the only
+interface (text in, text out), ao-bridge gives the human a live window — every
+AO project's sessions on one Kanban board with real-time state, PR links, and
+one-click spawn/send/kill — served from the dashboard over the daemon's REST
+API. The two are complementary (chat tools for the agent, board for the
+human), and ao-bridge deliberately talks to the daemon's loopback REST instead
+of shelling the CLI, so it works wherever the dashboard works.
 
 **On Orca specifically, honestly:** Orca (YC-backed, open source, macOS/Windows/
 Linux + mobile + SSH/cloud) matches or beats AO on harness breadth (30+,
