@@ -60,6 +60,28 @@ class ProjectsAndSessionsTest(ClientTestBase):
         self.assertEqual(len(sessions), 1)
         self.assertEqual(sessions[0]["projectId"], "personal")
 
+    def test_get_session_and_gone_detection(self):
+        self.ao.add_session(make_session("s1"))
+        self.assertEqual(self.client.get_session("s1")["isTerminated"], False)
+        with self.assertRaises(AOApiError) as ctx:
+            self.client.get_session("s-missing")
+        self.assertTrue(ctx.exception.is_gone)
+
+    def test_get_session_unwraps_daemon_envelope(self):
+        self.ao.add_session(make_session("s1", project_id="hermes-agent"))
+        self.ao.sessions_by_id["s1"] = {"session": self.ao.sessions_by_id["s1"]}
+        row = self.client.get_session("s1")
+        self.assertEqual(row["projectId"], "hermes-agent")
+
+    def test_conversation_parses_messages(self):
+        self.ao.add_session(make_session("s1"))
+        self.ao.set_conversation("s1", [{"role": "user", "text": "hi"}])
+        conv = self.client.conversation("s1")
+        self.assertEqual(conv["messages"][0]["text"], "hi")
+        with self.assertRaises(AOApiError) as ctx:
+            self.client.conversation("s-missing")
+        self.assertTrue(ctx.exception.is_gone)
+
 
 class SpawnTest(ClientTestBase):
     def test_spawn_sends_worker_payload(self):

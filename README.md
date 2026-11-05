@@ -48,11 +48,19 @@ Message sheet — send a user-authored message to a running session:
   mapped from live AO session state (`provisionState`, `status`, `kanbanColumn`,
   `isTerminated`). Cards show project, session name, harness, display status,
   branch, age, and PR links.
+- **Live updates**: a WebSocket stream (`/events`) pushes board changes the
+  moment the daemon state moves (server polls AO at ~1s, hash-gated diffs) —
+  no manual refresh. Falls back to 5s polling automatically; a `live`/`polling`
+  badge shows which mode you're in.
+- **Search & filter**: instant client-side match on project, session name, and
+  harness, plus a status dropdown built from live `displayStatus` values.
+- **Card detail sheet**: click a card for status, project, harness, branch,
+  age, the transcript tail (bounded to 200 messages), and the canonical
+  `ao://sessions/…` link — read-only.
 - **Spawn form**: pick a registered AO project, harness, session name, and
   initial prompt → creates the worker via the AO daemon.
 - **Message sheet**: send a user-authored message to any live session.
 - **Kill action** with confirmation on any non-archived session.
-- **Live refresh**: the board polls every 5 s; Archive collapses by default.
 
 ## Install
 
@@ -182,10 +190,12 @@ HERMES_SRC=~/.hermes/hermes-agent \
   -m unittest discover -s hermes-ao-bridge/tests -t hermes-ao-bridge/tests
 ```
 
-Coverage: AO client (health, projects, sessions, spawn payload shape, send,
-kill, error mapping), column mapping (every rule + precedence), and the FastAPI
-router (board assembly, spawn validation, send/kill forwarding, 502/404/409
-mapping) via `fastapi.testclient`.
+Coverage: AO client (health, projects, sessions, single-session unwrap, spawn
+payload shape, send, kill, conversation, error mapping), column mapping (every
+rule + precedence), and the FastAPI router (board assembly, spawn validation,
+send/kill forwarding, 502/404/409 mapping, detail route shape + transcript
+truncation + 404, WebSocket stream push-on-change / daemon-blip survival /
+auth rejection) via `fastapi.testclient`.
 
 ## Known limitations
 

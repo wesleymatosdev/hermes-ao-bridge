@@ -22,6 +22,8 @@ AO wire contract (verified against the live daemon and the AO backend source):
 
 from __future__ import annotations
 
+import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -29,7 +31,7 @@ import urllib.error
 import urllib.request
 from typing import Any, Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field
 
 router = APIRouter()
@@ -184,6 +186,16 @@ class AOClient:
         if prompt:
             body["prompt"] = prompt
         return self.request("POST", "/api/v1/sessions", body)
+
+    def get_session(self, session_id: str) -> dict:
+        # The daemon wraps single-session GETs in {"session": {...}} (the list
+        # endpoint does not) — unwrap so callers always get the row.
+        resp = self.request("GET", f"/api/v1/sessions/{session_id}")
+        return resp.get("session") or resp
+
+    def conversation(self, session_id: str) -> dict:
+        """Conversation snapshot: ``latestSequence`` + ``messages`` rows."""
+        return self.request("GET", f"/api/v1/sessions/{session_id}/conversation")
 
     def send(self, session_id: str, message: str, user_authored: bool = True) -> dict:
         return self.request("POST", f"/api/v1/sessions/{session_id}/send",
@@ -394,3 +406,116 @@ def kill(session_id: str):
     except AOApiError as err:
         _raise_mapped(err)
     return {"ok": True, "sessionId": session_id}
+
+
+TRANSCRIPT_TAIL_LINES = 200
+
+
+@router.get("/sessions/{session_id}/detail")
+def detail(session_id: str):
+    """Read-only card detail: session metadata + bounded transcript tail."""
+    ao = client()
+    sess: dict = {}
+    conv: dict = {}
+    try:
+        sess = ao.get_session(session_id)
+        conv = ao.conversation(session_id)
+    except AOApiError as err:
+        _raise_mapped(err)
+    messages = conv.get("messages") or []
+    if not isinstance(messages, list):
+        messages = []
+    tail = messages[-TRANSCRIPT_TAIL_LINES:]
+    project_id = sess.get("projectId") or ""
+    activity = sess.get("activity") or {}
+    return {
+        "ok": True,
+        "session": {
+            "id": sess.get("id"),
+            "displayName": sess.get("displayName") or sess.get("id"),
+            "projectId": project_id,
+            "harness": sess.get("harness") or "",
+            "status": sess.get("status") or "",
+            "displayStatus": sess.get("displayStatus") or "",
+            "branch": sess.get("branch") or "",
+            "createdAt": sess.get("createdAt") or "",
+            "updatedAt": sess.get("updatedAt") or "",
+            "activityState": activity.get("state") or "",
+            "aoLink": f"ao://sessions/{project_id}/{session_id}" if project_id
+                      else f"ao://sessions/{session_id}",
+        },
+        "transcript": [
+            m for m in (
+                {"role": m.get("role") or "", "text": m.get("text") or "",
+                 "createdAt": m.get("createdAt") or ""}
+                for m in tail if isinstance(m, dict)
+            ) if m["text"]
+        ],
+        "transcriptTotal": len(messages),
+        "transcriptTruncated": len(messages) > len(tail),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Live updates: WS stream (server polls the AO daemon, pushes diffs)
+# ---------------------------------------------------------------------------
+
+EVENT_POLL_SECONDS = 1.0
+
+
+def _ws_upgrade_authorized(ws: WebSocket) -> bool:
+    """Authorize the WS upgrade via the dashboard's canonical gate
+    (``web_server_chat._ws_auth_ok``: ``?token=`` / ``?ticket=``) so this
+    endpoint can never drift from core auth; accepts when the dashboard isn't
+    importable (bare-FastAPI test harness)."""
+    try:
+        from hermes_cli import web_server_chat as _ws
+    except Exception:
+        return True
+    return bool(_ws._ws_auth_ok(ws))
+
+
+def _cards_digest(cards: list) -> str:
+    return hashlib.sha256(
+        json.dumps(cards, sort_keys=True, default=str).encode("utf-8")
+    ).hexdigest()
+
+
+@router.websocket("/events")
+async def events(ws: WebSocket):
+    """Push board snapshots when AO state changes (server polls at ~1s).
+
+    Sends ``{"type": "board", "board": <board snapshot>}`` only when the card
+    set changed, so an idle daemon costs the client nothing.
+    """
+    if not _ws_upgrade_authorized(ws):
+        await ws.close(code=1008)
+        return
+    await ws.accept()
+    last_digest: Optional[str] = None
+    try:
+        while True:
+            try:
+                msg = await asyncio.wait_for(ws.receive(), timeout=EVENT_POLL_SECONDS)
+                if msg.get("type") == "websocket.disconnect":
+                    return
+            except TimeoutError:
+                pass  # no client message — poll the daemon
+            try:
+                snap = await asyncio.to_thread(board_snapshot, client())
+            except AOApiError:
+                continue  # daemon down/blip: keep the connection, keep last board
+            digest = _cards_digest(snap.get("cards") or [])
+            if digest != last_digest:
+                last_digest = digest
+                await ws.send_json({"type": "board", "board": snap})
+    except WebSocketDisconnect:
+        return
+    except asyncio.CancelledError:
+        return
+    except Exception as exc:  # never crash the dashboard worker
+        log.warning("ao-bridge event stream error: %s", exc)
+        try:
+            await ws.close()
+        except Exception:
+            pass

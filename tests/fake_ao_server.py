@@ -36,6 +36,7 @@ class FakeAO:
     def __init__(self):
         self.project_rows: list[dict] = []
         self.sessions_by_id: dict[str, dict] = {}
+        self.conversations: dict[str, list[dict]] = {}
         self.created: list[dict] = []            # spawn payloads seen
         self.sends: list[dict] = []              # send payloads seen
         self.killed: list[str] = []
@@ -47,6 +48,9 @@ class FakeAO:
 
     def add_session(self, session: dict) -> None:
         self.sessions_by_id[session["id"]] = session
+
+    def set_conversation(self, session_id: str, messages: list[dict]) -> None:
+        self.conversations[session_id] = messages
 
     def session_ids(self) -> list[str]:
         return list(self.sessions_by_id.keys())
@@ -95,10 +99,17 @@ class _Handler(BaseHTTPRequestHandler):
             return self._json(200, {"projects": ao.project_rows})
         if path == "/api/v1/sessions":
             return self._json(200, {"sessions": list(ao.sessions_by_id.values())})
+        if path.endswith("/conversation"):
+            session_id = self._session_id()
+            if session_id not in ao.sessions_by_id:
+                return self._json(404, {"error": "not found"})
+            return self._json(200, {"sessionId": session_id,
+                                    "latestSequence": len(ao.conversations.get(session_id) or []),
+                                    "messages": ao.conversations.get(session_id) or []})
         session = ao.sessions_by_id.get(self._session_id())
         if session is None:
             return self._json(404, {"error": "not found"})
-        return self._json(200, {"id": self._session_id(), "isTerminated": session["isTerminated"]})
+        return self._json(200, session)
 
     def do_POST(self):
         ao = self.ao

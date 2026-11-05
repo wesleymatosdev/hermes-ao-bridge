@@ -373,6 +373,101 @@
   gap: 8px;
 }
 
+/* --- live badge, search, status filter ----------------------------------- */
+
+.ao-header-live {
+  font-size: 10.5px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  border: 1px solid var(--ao-border);
+  border-radius: 999px;
+  padding: 2px 9px;
+  color: var(--ao-text-dim);
+}
+
+.ao-header-live.is-live {
+  color: var(--ao-good);
+  border-color: rgba(52, 211, 153, 0.45);
+  background: rgba(52, 211, 153, 0.08);
+}
+
+.ao-search { width: 230px; }
+.ao-status-filter { width: 170px; }
+
+/* --- detail sheet --------------------------------------------------------- */
+
+.ao-sheet-detail {
+  width: min(720px, calc(100vw - 40px));
+  max-height: calc(100vh - 60px);
+  overflow-y: auto;
+}
+
+.ao-detail-meta {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px 16px;
+}
+
+.ao-detail-row {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  font-size: 12.5px;
+  min-width: 0;
+}
+
+.ao-detail-key {
+  font-size: 10.5px;
+  color: var(--ao-text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  flex-shrink: 0;
+}
+
+.ao-detail-transcript {
+  border-top: 1px solid var(--ao-border);
+  padding-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 320px;
+  overflow-y: auto;
+}
+
+.ao-transcript-row {
+  display: flex;
+  gap: 8px;
+  font-size: 12px;
+  line-height: 1.45;
+  align-items: baseline;
+}
+
+.ao-transcript-role {
+  flex-shrink: 0;
+  width: 52px;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--ao-accent-2);
+}
+
+.ao-role-assistant .ao-transcript-role,
+.ao-role-agent .ao-transcript-role { color: var(--ao-good); }
+.ao-role-user .ao-transcript-role,
+.ao-role-human .ao-transcript-role { color: var(--ao-warn); }
+
+.ao-transcript-text {
+  color: var(--ao-text);
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 88px;
+  overflow: hidden;
+  -webkit-line-clamp: 4;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+}
+
 /* narrow dashboards: columns scroll horizontally */
 @media (max-width: 1400px) {
   .ao-board { grid-template-columns: repeat(6, minmax(230px, 260px)); }

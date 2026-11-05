@@ -94,18 +94,23 @@
     const [busy, setBusy] = useState(null);
     const [err, setErr] = useState(null);
 
-    function action(kind) {
+    function action(kind, e) {
+      e.stopPropagation();
       setBusy(kind); setErr(null);
       const url = kind === "kill"
         ? API + "/sessions/" + encodeURIComponent(card.id) + "/kill"
         : null;
       authedFetchJson(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" })
         .then(function () { props.onChanged(); })
-        .catch(function (e) { setErr(parseApiErrorMessage(e)); })
+        .catch(function (e2) { setErr(parseApiErrorMessage(e2)); })
         .finally(function () { setBusy(null); });
     }
 
-    return h("div", { className: "ao-card ao-card-" + (COLUMN_CLASS[card.column] || "") },
+    return h("div", {
+      className: "ao-card ao-card-" + (COLUMN_CLASS[card.column] || ""),
+      onClick: function () { props.onOpen(card); },
+      title: "Click for session detail",
+    },
       h("div", { className: "ao-card-top" },
         h("span", { className: "ao-card-project", title: card.projectId || "standalone" }, card.project),
         h("span", { className: "ao-card-age", title: card.createdAt }, timeAgo(card.createdAt))
@@ -122,15 +127,16 @@
         card.column !== "archive" && card.column !== "done"
           ? h("button", {
               className: "ao-btn ao-btn-ghost", disabled: !!busy,
-              onClick: function () { props.onSend(card); },
+              onClick: function (e) { props.onSend(card, e); },
             }, "Message")
           : null,
         card.column !== "archive"
           ? h("button", {
               className: "ao-btn ao-btn-danger", disabled: !!busy,
               title: "Kill this AO session",
-              onClick: function () {
-                if (window.confirm("Kill AO session \"" + card.displayName + "\"? This terminates the agent session.")) action("kill");
+              onClick: function (e) {
+                e.stopPropagation();
+                if (window.confirm("Kill AO session \"" + card.displayName + "\"? This terminates the agent session.")) action("kill", e);
               },
             }, busy === "kill" ? "Killing…" : "Kill")
           : null
@@ -151,7 +157,7 @@
             cards.length === 0
               ? h("div", { className: "ao-column-empty" }, "No sessions")
               : cards.map(function (c) {
-                  return h(Card, { key: c.id, card: c, onChanged: props.onChanged, onSend: props.onSend });
+                  return h(Card, { key: c.id, card: c, onChanged: props.onChanged, onSend: props.onSend, onOpen: props.onOpen });
                 })
           )
     );
@@ -264,35 +270,141 @@
     );
   }
 
+  // --- Detail sheet (card click; read-only) --------------------------------
+
+  function DetailSheet(props) {
+    const [detail, setDetail] = useState(null);
+    const [err, setErr] = useState(null);
+    const session = props.session;
+
+    useEffect(function () {
+      let alive = true;
+      setDetail(null); setErr(null);
+      authedFetchJson(API + "/sessions/" + encodeURIComponent(session.id) + "/detail")
+        .then(function (d) { if (alive) setDetail(d); })
+        .catch(function (e) { if (alive) setErr(parseApiErrorMessage(e)); });
+      return function () { alive = false; };
+    }, [session.id]);
+
+    const s = detail && detail.session;
+    return h("div", { className: "ao-overlay", onClick: function (e) { if (e.target === e.currentTarget) props.onClose(); } },
+      h("div", { className: "ao-sheet ao-sheet-detail" },
+        h("div", { className: "ao-sheet-title" }, session.displayName),
+        !detail && !err ? h("div", { className: "ao-loading" }, "Loading session detail…") : null,
+        err ? h("div", { className: "ao-sheet-error" }, err) : null,
+        s ? h("div", { className: "ao-detail-meta" },
+          h("div", { className: "ao-detail-row" }, h("span", { className: "ao-detail-key" }, "Status"), h("span", null, s.displayStatus || s.status || "—")),
+          h("div", { className: "ao-detail-row" }, h("span", { className: "ao-detail-key" }, "Project"), h("span", null, s.projectId || "standalone")),
+          h("div", { className: "ao-detail-row" }, h("span", { className: "ao-detail-key" }, "Harness"), h("span", null, s.harness || "—")),
+          h("div", { className: "ao-detail-row" }, h("span", { className: "ao-detail-key" }, "Branch"), h("span", { className: "ao-chip-branch" }, s.branch || "—")),
+          h("div", { className: "ao-detail-row" }, h("span", { className: "ao-detail-key" }, "Created"), h("span", null, timeAgo(s.createdAt) + (s.createdAt ? " (" + s.createdAt + ")" : ""))),
+          h("div", { className: "ao-detail-row" }, h("span", { className: "ao-detail-key" }, "AO link"), h("a", { className: "ao-chip-pr", href: s.aoLink }, s.aoLink))
+        ) : null,
+        s ? h("div", { className: "ao-detail-transcript" },
+          h("div", { className: "ao-detail-key" },
+            "Transcript" + (detail.transcriptTruncated ? " (last " + detail.transcript.length + " of " + detail.transcriptTotal + " messages)" : "")),
+          (detail.transcript || []).length === 0
+            ? h("div", { className: "ao-column-empty" }, "No messages yet")
+            : (detail.transcript || []).map(function (m, i) {
+                return h("div", { key: i, className: "ao-transcript-row ao-role-" + (m.role || "unknown") },
+                  h("span", { className: "ao-transcript-role" }, m.role || "?"),
+                  h("span", { className: "ao-transcript-text" }, m.text));
+              })
+        ) : null,
+        h("div", { className: "ao-sheet-actions" },
+          h("button", { type: "button", className: "ao-btn ao-btn-ghost", onClick: props.onClose }, "Close")
+        )
+      )
+    );
+  }
+
   // --- Board page ----------------------------------------------------------
 
   function AoBridgePage() {
     const [data, setData] = useState(null);
     const [error, setError] = useState(null);
     const [loaded, setLoaded] = useState(false);
+    const [live, setLive] = useState(false);
     const [refreshedAt, setRefreshedAt] = useState(null);
     const [spawnOpen, setSpawnOpen] = useState(false);
     const [sendTarget, setSendTarget] = useState(null);
+    const [detailTarget, setDetailTarget] = useState(null);
+    const [query, setQuery] = useState("");
+    const [statusFilter, setStatusFilter] = useState("all");
     const [collapsed, setCollapsed] = useState(function () {
       try { return window.localStorage.getItem("ao-bridge.collapsed") === "archive"; }
       catch (_e) { return false; }
     });
     const timerRef = useRef(null);
+    const wsRef = useRef(null);
 
     const refresh = useCallback(function () {
       return authedFetchJson(API + "/board")
         .then(function (body) {
           setData(body); setError(null);
-          setRefreshedAt(new Date());
+          setLoaded(true); setRefreshedAt(new Date());
         })
         .catch(function (e) { setError(parseApiErrorMessage(e)); })
         .finally(function () { setLoaded(true); });
     }, []);
 
+    // Live updates: WebSocket /events (server polls the daemon, pushes on
+    // change); falls back to 5s polling when the SDK has no WS helper or the
+    // stream is refused.
     useEffect(function () {
+      let closed = false;
+      let backoff = 1000;
+      let pollTimer = null;
+      let reconnectTimer = null;
+
+      function startPoll() {
+        if (pollTimer || closed) return;
+        setLive(false);
+        refresh();
+        pollTimer = window.setInterval(refresh, POLL_MS);
+      }
+
+      function onBoard(body) {
+        if (closed) return;
+        setData(body); setError(null);
+        setLoaded(true); setLive(true); setRefreshedAt(new Date());
+      }
+
+      function openWs() {
+        if (closed) return;
+        if (!SDK.buildWsUrl) { startPoll(); return; }
+        SDK.buildWsUrl(API + "/events", {}).then(function (url) {
+          if (closed) return;
+          let ws;
+          try { ws = new WebSocket(url); } catch (_e) { startPoll(); return; }
+          ws.onopen = function () { backoff = 1000; };
+          ws.onmessage = function (ev) {
+            try {
+              const msg = JSON.parse(ev.data);
+              if (msg && msg.type === "board" && msg.board) onBoard(msg.board);
+            } catch (_e) { /* ignore */ }
+          };
+          ws.onclose = function (e) {
+            if (closed) return;
+            if (e && e.code === 1008) {
+              setError("Live stream unauthorized — falling back to polling");
+              startPoll();
+              return;
+            }
+            reconnectTimer = window.setTimeout(openWs, Math.min(backoff, 30000));
+            backoff = Math.min(backoff * 2, 30000);
+          };
+        }).catch(function () { startPoll(); });
+      }
+
       refresh();
-      timerRef.current = window.setInterval(refresh, POLL_MS);
-      return function () { if (timerRef.current) window.clearInterval(timerRef.current); };
+      openWs();
+      return function () {
+        closed = true;
+        if (pollTimer) window.clearInterval(pollTimer);
+        if (reconnectTimer) window.clearTimeout(reconnectTimer);
+        try { if (wsRef.current) wsRef.current.close(); } catch (_e) {}
+      };
     }, [refresh]);
 
     function toggleArchive() {
@@ -303,10 +415,28 @@
       });
     }
 
+    const statusOptions = useMemo(function () {
+      const seen = {};
+      (data && data.cards || []).forEach(function (c) {
+        const v = (c.displayStatus || c.status || "").toLowerCase();
+        if (v) seen[v] = true;
+      });
+      return Object.keys(seen).sort();
+    }, [data]);
+
     const columns = useMemo(function () {
       if (!data) return [];
+      const q = query.trim().toLowerCase();
+      const filter = statusFilter !== "all"
+        ? function (c) { return (c.displayStatus || c.status || "").toLowerCase() === statusFilter; }
+        : null;
       const buckets = {};
       (data.cards || []).forEach(function (c) {
+        if (q
+            && (c.project || "").toLowerCase().indexOf(q) === -1
+            && (c.displayName || "").toLowerCase().indexOf(q) === -1
+            && (c.harness || "").toLowerCase().indexOf(q) === -1) return;
+        if (filter && !filter(c)) return;
         (buckets[c.column] = buckets[c.column] || []).push(c);
       });
       return (data.columns || []).map(function (col) {
@@ -314,7 +444,7 @@
         bucket.sort(function (a, b) { return (b.createdAt || "").localeCompare(a.createdAt || ""); });
         return { id: col.id, label: col.label, cards: bucket };
       });
-    }, [data]);
+    }, [data, query, statusFilter]);
 
     return h("div", { className: "ao-bridge" },
       h("div", { className: "ao-header" },
@@ -323,9 +453,24 @@
           data && data.baseUrl
             ? h("span", { className: "ao-header-daemon", title: data.baseUrl }, "daemon " + data.baseUrl.replace(/^https?:\/\//, ""))
             : null,
+          h("span", { className: "ao-header-live" + (live ? " is-live" : "") },
+            live ? "live" : "polling"),
           refreshedAt ? h("span", { className: "ao-header-updated" }, "updated " + refreshedAt.toLocaleTimeString()) : null
         ),
         h("div", { className: "ao-header-actions" },
+          h("input", {
+            className: "ao-input ao-search", placeholder: "Search project, session, harness…",
+            value: query, onChange: function (e) { setQuery(e.target.value); },
+          }),
+          h("select", {
+            className: "ao-input ao-status-filter", value: statusFilter,
+            onChange: function (e) { setStatusFilter(e.target.value); },
+          },
+            h("option", { value: "all" }, "All statuses"),
+            statusOptions.map(function (s) {
+              return h("option", { key: s, value: s }, s);
+            })
+          ),
           error ? h("span", { className: "ao-banner ao-banner-error" }, error) : null,
           h("button", { className: "ao-btn ao-btn-ghost", onClick: function () { refresh(); } }, "Refresh"),
           h("button", { className: "ao-btn ao-btn-primary", onClick: function () { setSpawnOpen(true); } }, "+ Spawn worker")
@@ -339,7 +484,7 @@
                 key: col.id, id: col.id, label: col.label, cards: col.cards,
                 collapsed: col.id === "archive" && collapsed,
                 onToggle: col.id === "archive" ? toggleArchive : undefined,
-                onChanged: refresh, onSend: setSendTarget,
+                onChanged: refresh, onSend: setSendTarget, onOpen: setDetailTarget,
               });
             })
           ),
@@ -361,6 +506,12 @@
             session: sendTarget,
             onClose: function () { setSendTarget(null); },
             onChanged: function () { setSendTarget(null); refresh(); },
+          })
+        : null,
+      detailTarget
+        ? h(DetailSheet, {
+            session: detailTarget,
+            onClose: function () { setDetailTarget(null); },
           })
         : null
     );
