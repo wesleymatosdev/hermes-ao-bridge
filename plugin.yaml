@@ -1,0 +1,14 @@
+name: ao-bridge
+version: 0.1.0
+label: AO Bridge
+description: Agent Orchestrator bridge — a Kanban board over the local AO daemon (projects, sessions, spawn, send)
+author: Wesley Matos
+license: MIT
+tags:
+  - dashboard
+  - agent-orchestrator
+config_schema:
+  ao_base_url:
+    type: str
+    default: http://127.0.0.1:3001
+    description: Base URL of the local AO daemon REST API (loopback)
