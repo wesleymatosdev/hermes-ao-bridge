@@ -28,6 +28,7 @@ import json
 import logging
 import os
 import urllib.error
+import urllib.parse
 import urllib.request
 from typing import Any, Optional
 
@@ -190,19 +191,25 @@ class AOClient:
     def get_session(self, session_id: str) -> dict:
         # The daemon wraps single-session GETs in {"session": {...}} (the list
         # endpoint does not) — unwrap so callers always get the row.
-        resp = self.request("GET", f"/api/v1/sessions/{session_id}")
+        # Session ids are interpolated into daemon URLs — always percent-encode
+        # them so ?, # or .. cannot reshape the request path.
+        sid = urllib.parse.quote(session_id, safe="")
+        resp = self.request("GET", f"/api/v1/sessions/{sid}")
         return resp.get("session") or resp
 
     def conversation(self, session_id: str) -> dict:
         """Conversation snapshot: ``latestSequence`` + ``messages`` rows."""
-        return self.request("GET", f"/api/v1/sessions/{session_id}/conversation")
+        sid = urllib.parse.quote(session_id, safe="")
+        return self.request("GET", f"/api/v1/sessions/{sid}/conversation")
 
     def send(self, session_id: str, message: str, user_authored: bool = True) -> dict:
-        return self.request("POST", f"/api/v1/sessions/{session_id}/send",
+        sid = urllib.parse.quote(session_id, safe="")
+        return self.request("POST", f"/api/v1/sessions/{sid}/send",
                             {"message": message, "userAuthored": user_authored})
 
     def kill(self, session_id: str) -> dict:
-        return self.request("POST", f"/api/v1/sessions/{session_id}/kill", {})
+        sid = urllib.parse.quote(session_id, safe="")
+        return self.request("POST", f"/api/v1/sessions/{sid}/kill", {})
 
 
 def client(timeout_s: float = 15.0, token: Optional[str] = None) -> AOClient:
