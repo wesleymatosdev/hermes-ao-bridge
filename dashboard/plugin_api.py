@@ -454,7 +454,10 @@ def detail(session_id: str):
         "transcript": [
             m for m in (
                 {"role": m.get("role") or "", "text": m.get("text") or "",
-                 "createdAt": m.get("createdAt") or ""}
+                 "createdAt": m.get("createdAt") or "",
+                 # Wire truth: the daemon marks this omitempty, so an absent
+                 # flag means false (agent/orchestrator-originated).
+                 "authoredByUser": bool(m.get("authoredByUser"))}
                 for m in tail if isinstance(m, dict)
             ) if m["text"]
         ],

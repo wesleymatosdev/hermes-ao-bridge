@@ -282,12 +282,40 @@
     );
   }
 
+  // --- Card detail: message classes -----------------------------------------
+  // Three classes over the daemon's wire truth (authoredByUser is omitempty,
+  // so absent = false):
+  //   worker       — assistant turns (the harness's own output)
+  //   user         — authoredByUser=true (End user)
+  //   orchestrator — everything else non-assistant (Orchestrator / other agent)
+  const MSG_CLASSES = {
+    worker: { label: "Worker", short: "Worker", title: "The harness's own output (assistant turns)" },
+    user: { label: "End user", short: "End user", title: "Authored by the session's user (authoredByUser)" },
+    orchestrator: { label: "Orchestrator / other agent", short: "Orchestrator", title: "Not user-authored and not an assistant turn" },
+  };
+
+  function messageClass(m) {
+    if ((m.role || "").toLowerCase() === "assistant") return "worker";
+    if (m.authoredByUser) return "user";
+    return "orchestrator";
+  }
+
   // --- Detail sheet (card click; read-only) --------------------------------
 
   function DetailSheet(props) {
     const [detail, setDetail] = useState(null);
     const [err, setErr] = useState(null);
+    const [hiddenClasses, setHiddenClasses] = useState({});
     const session = props.session;
+
+    function toggleClass(id) {
+      setHiddenClasses(function (prev) {
+        const next = {};
+        Object.keys(prev).forEach(function (k) { next[k] = prev[k]; });
+        if (next[id]) delete next[id]; else next[id] = true;
+        return next;
+      });
+    }
 
     useEffect(function () {
       let alive = true;
@@ -315,13 +343,26 @@
         s ? h("div", { className: "ao-detail-transcript" },
           h("div", { className: "ao-detail-key" },
             "Transcript" + (detail.transcriptTruncated ? " (last " + detail.transcript.length + " of " + detail.transcriptTotal + " messages)" : "")),
-          (detail.transcript || []).length === 0
-            ? h("div", { className: "ao-column-empty" }, "No messages yet")
-            : (detail.transcript || []).map(function (m, i) {
-                return h("div", { key: i, className: "ao-transcript-row ao-role-" + (m.role || "unknown") },
-                  h("span", { className: "ao-transcript-role" }, m.role || "?"),
-                  h("span", { className: "ao-transcript-text" }, m.text));
-              })
+          h("div", { className: "ao-class-filters" },
+            Object.keys(MSG_CLASSES).map(function (id) {
+              const off = !!hiddenClasses[id];
+              return h("button", {
+                key: id,
+                className: "ao-chip ao-class-chip ao-class-" + id + (off ? " is-off" : ""),
+                title: MSG_CLASSES[id].title + (off ? " — hidden, click to show" : " — shown, click to hide"),
+                onClick: function () { toggleClass(id); },
+              }, (off ? "\u25CB " : "\u25CF ") + MSG_CLASSES[id].label);
+            })),
+          (detail.transcript || []).filter(function (m) { return !hiddenClasses[messageClass(m)]; }).length === 0
+            ? h("div", { className: "ao-column-empty" }, "No messages in the shown classes")
+            : (detail.transcript || [])
+                .filter(function (m) { return !hiddenClasses[messageClass(m)]; })
+                .map(function (m, i) {
+                  const cls = messageClass(m);
+                  return h("div", { key: i, className: "ao-transcript-row ao-msg-" + cls },
+                    h("span", { className: "ao-transcript-role", title: MSG_CLASSES[cls].label }, MSG_CLASSES[cls].short),
+                    h("span", { className: "ao-transcript-text" }, m.text));
+                })
         ) : null,
         h("div", { className: "ao-sheet-actions" },
           h("button", { type: "button", className: "ao-btn ao-btn-ghost", onClick: props.onClose }, "Close")

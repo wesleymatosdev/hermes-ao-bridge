@@ -108,6 +108,25 @@ class DetailRouteTest(unittest.TestCase):
         finally:
             plugin_api.TRANSCRIPT_TAIL_LINES = 200
 
+    def test_detail_normalizes_authorship_flag(self):
+        # Wire truth: the daemon marks authoredByUser omitempty, so absent
+        # means false; the detail route must emit an explicit bool either way.
+        self.ao.set_conversation("s1", [
+            {"role": "user", "text": "steering from the end user",
+             "createdAt": "2026-01-01T00:00:00Z", "authoredByUser": True},
+            {"role": "assistant", "text": "worker output",
+             "createdAt": "2026-01-01T00:00:05Z"},  # flag absent -> false
+            {"role": "user", "text": "orchestrator-injected correction",
+             "createdAt": "2026-01-01T00:00:10Z"},  # flag absent -> false
+        ])
+        resp = self.http.get("/api/plugins/ao-bridge/sessions/s1/detail")
+        transcript = resp.json()["transcript"]
+        self.assertEqual(
+            [(m["text"], m["authoredByUser"]) for m in transcript],
+            [("steering from the end user", True),
+             ("worker output", False),
+             ("orchestrator-injected correction", False)])
+
     def test_detail_gone_session_maps_to_404(self):
         resp = self.http.get("/api/plugins/ao-bridge/sessions/none/detail")
         self.assertEqual(resp.status_code, 404)

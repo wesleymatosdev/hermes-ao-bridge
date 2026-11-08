@@ -455,17 +455,33 @@
 
 .ao-transcript-role {
   flex-shrink: 0;
-  width: 52px;
+  width: 96px;
   font-size: 10px;
   text-transform: uppercase;
   letter-spacing: 0.05em;
-  color: var(--ao-accent-2);
+  color: var(--ao-text-dim);
 }
 
-.ao-role-assistant .ao-transcript-role,
-.ao-role-agent .ao-transcript-role { color: var(--ao-good); }
-.ao-role-user .ao-transcript-role,
-.ao-role-human .ao-transcript-role { color: var(--ao-warn); }
+/* message classes: Worker (harness output) / End user / Orchestrator */
+.ao-msg-worker .ao-transcript-role { color: var(--ao-good); }
+.ao-msg-user .ao-transcript-role { color: var(--ao-accent-2); }
+.ao-msg-orchestrator .ao-transcript-role { color: var(--ao-warn); }
+
+.ao-class-filters {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.ao-class-chip {
+  cursor: pointer;
+  font-size: 10.5px;
+  text-transform: none;
+}
+.ao-class-chip.is-off { opacity: 0.45; }
+.ao-class-worker { color: var(--ao-good); border-color: rgba(52, 211, 153, 0.4); }
+.ao-class-user { color: var(--ao-accent-2); border-color: rgba(56, 189, 248, 0.4); }
+.ao-class-orchestrator { color: var(--ao-warn); border-color: rgba(251, 191, 36, 0.4); }
 
 .ao-transcript-text {
   color: var(--ao-text);

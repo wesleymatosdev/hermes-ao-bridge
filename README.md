@@ -65,7 +65,12 @@ Message sheet — send a user-authored message to a running session:
   from live `/events` pushes.
 - **Card detail sheet**: click a card for status, project, harness, branch,
   age, the transcript tail (bounded to 200 messages), and the canonical
-  `ao://sessions/…` link — read-only.
+  `ao://sessions/…` link — read-only. Transcript turns are classified into
+  three message classes from the daemon's `authoredByUser` wire flag:
+  **Worker** (assistant turns — the harness's own output), **End user**
+  (`authoredByUser: true`), and **Orchestrator / other agent** (everything
+  else), each with its own color, a class label on every turn, and a
+  click-to-hide filter chip per class.
 - **Spawn form**: pick a registered AO project, harness, session name, and
   initial prompt → creates the worker via the AO daemon.
 - **Message sheet**: send a user-authored message to any live session.
