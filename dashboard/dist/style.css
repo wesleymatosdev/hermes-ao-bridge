@@ -394,6 +394,16 @@
 
 .ao-search { width: 230px; }
 .ao-status-filter { width: 170px; }
+.ao-filter-project { width: 175px; }
+.ao-filter-harness { width: 150px; }
+.ao-filter-recency { width: 130px; }
+
+.ao-btn-toggle.is-on {
+  color: var(--ao-accent-2);
+  border-color: rgba(56, 189, 248, 0.45);
+  background: rgba(56, 189, 248, 0.10);
+  font-weight: 600;
+}
 
 /* --- detail sheet --------------------------------------------------------- */
 

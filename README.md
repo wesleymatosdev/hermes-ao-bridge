@@ -53,7 +53,16 @@ Message sheet — send a user-authored message to a running session:
   no manual refresh. Falls back to 5s polling automatically; a `live`/`polling`
   badge shows which mode you're in.
 - **Search & filter**: instant client-side match on project, session name, and
-  harness, plus a status dropdown built from live `displayStatus` values.
+  harness, plus a status dropdown built from live `displayStatus` values. On top
+  of the text search the header has a **project** dropdown (from the registered
+  AO projects), a **harness** dropdown (from the harnesses present on cards), a
+  **recency** selector (Last hour / Last 24h / Last 7 days / All time, keyed on
+  each session's last-activity timestamp, defaulting to Last 24h), and an
+  **Active only** toggle (on by default) that hides terminated, exited and
+  archived sessions. Recency and the active toggle persist across reloads. All
+  filtering happens in the browser over the already-fetched board — changing a
+  filter makes no daemon call, and the filtered view still updates in place
+  from live `/events` pushes.
 - **Card detail sheet**: click a card for status, project, harness, branch,
   age, the transcript tail (bounded to 200 messages), and the canonical
   `ao://sessions/…` link — read-only.

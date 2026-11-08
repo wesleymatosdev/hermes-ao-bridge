@@ -21,6 +21,18 @@
   const API = "/api/plugins/ao-bridge";
   const POLL_MS = 5000;
 
+  // Recency buckets for the board filter; ms=0 means "no time bound".
+  const RECENCY_OPTIONS = [
+    { id: "1h", label: "Last hour", ms: 3600e3 },
+    { id: "24h", label: "Last 24h", ms: 86400e3 },
+    { id: "7d", label: "Last 7 days", ms: 7 * 86400e3 },
+    { id: "all", label: "All time", ms: 0 },
+  ];
+
+  // Raw AO statuses that mean "no agent is alive behind this session" — hidden
+  // by the Active-only toggle (archive-column cards are hidden with it too).
+  const INACTIVE_STATUSES = { terminated: true, exited: true };
+
   // Always use the local implementation: the host SDK's timeAgo expects a
   // different time format and rendered "NaNd ago" on live cards.
   function timeAgo(iso) {
@@ -331,6 +343,16 @@
     const [detailTarget, setDetailTarget] = useState(null);
     const [query, setQuery] = useState("");
     const [statusFilter, setStatusFilter] = useState("all");
+    const [projectFilter, setProjectFilter] = useState("all");
+    const [harnessFilter, setHarnessFilter] = useState("all");
+    const [recency, setRecency] = useState(function () {
+      try { return window.localStorage.getItem("ao-bridge.recency") || "24h"; }
+      catch (_e) { return "24h"; }
+    });
+    const [activeOnly, setActiveOnly] = useState(function () {
+      try { return window.localStorage.getItem("ao-bridge.activeOnly") !== "0"; }
+      catch (_e) { return true; }
+    });
     const [collapsed, setCollapsed] = useState(function () {
       try { return window.localStorage.getItem("ao-bridge.collapsed") === "archive"; }
       catch (_e) { return false; }
@@ -415,10 +437,32 @@
       });
     }
 
+    function setRecencyPersisted(id) {
+      setRecency(id);
+      try { window.localStorage.setItem("ao-bridge.recency", id); } catch (_e) {}
+    }
+
+    function toggleActiveOnly() {
+      setActiveOnly(function (prev) {
+        const next = !prev;
+        try { window.localStorage.setItem("ao-bridge.activeOnly", next ? "1" : "0"); } catch (_e) {}
+        return next;
+      });
+    }
+
     const statusOptions = useMemo(function () {
       const seen = {};
       (data && data.cards || []).forEach(function (c) {
         const v = (c.displayStatus || c.status || "").toLowerCase();
+        if (v) seen[v] = true;
+      });
+      return Object.keys(seen).sort();
+    }, [data]);
+
+    const harnessOptions = useMemo(function () {
+      const seen = {};
+      (data && data.cards || []).forEach(function (c) {
+        const v = (c.harness || "").trim();
         if (v) seen[v] = true;
       });
       return Object.keys(seen).sort();
@@ -430,6 +474,8 @@
       const filter = statusFilter !== "all"
         ? function (c) { return (c.displayStatus || c.status || "").toLowerCase() === statusFilter; }
         : null;
+      const bucket = RECENCY_OPTIONS.find(function (r) { return r.id === recency; });
+      const cutoffMs = bucket && bucket.ms ? Date.now() - bucket.ms : 0;
       const buckets = {};
       (data.cards || []).forEach(function (c) {
         if (q
@@ -437,14 +483,21 @@
             && (c.displayName || "").toLowerCase().indexOf(q) === -1
             && (c.harness || "").toLowerCase().indexOf(q) === -1) return;
         if (filter && !filter(c)) return;
+        if (projectFilter !== "all" && (c.projectId || "") !== projectFilter) return;
+        if (harnessFilter !== "all" && (c.harness || "").trim() !== harnessFilter) return;
+        if (activeOnly && (c.column === "archive" || INACTIVE_STATUSES[(c.status || "").toLowerCase()])) return;
+        if (cutoffMs) {
+          const ts = new Date(c.updatedAt || c.createdAt || "").getTime();
+          if (!isFinite(ts) || ts < cutoffMs) return;
+        }
         (buckets[c.column] = buckets[c.column] || []).push(c);
       });
       return (data.columns || []).map(function (col) {
-        const bucket = buckets[col.id] || [];
-        bucket.sort(function (a, b) { return (b.createdAt || "").localeCompare(a.createdAt || ""); });
-        return { id: col.id, label: col.label, cards: bucket };
+        const b = buckets[col.id] || [];
+        b.sort(function (a, b2) { return (b2.createdAt || "").localeCompare(a.createdAt || ""); });
+        return { id: col.id, label: col.label, cards: b };
       });
-    }, [data, query, statusFilter]);
+    }, [data, query, statusFilter, projectFilter, harnessFilter, recency, activeOnly]);
 
     return h("div", { className: "ao-bridge" },
       h("div", { className: "ao-header" },
@@ -462,6 +515,40 @@
             className: "ao-input ao-search", placeholder: "Search project, session, harness…",
             value: query, onChange: function (e) { setQuery(e.target.value); },
           }),
+          h("select", {
+            className: "ao-input ao-filter-project", title: "Filter by project",
+            value: projectFilter,
+            onChange: function (e) { setProjectFilter(e.target.value); },
+          },
+            h("option", { value: "all" }, "All projects"),
+            ((data && data.projects) || []).map(function (p) {
+              return h("option", { key: p.id, value: p.id }, p.name);
+            })
+          ),
+          h("select", {
+            className: "ao-input ao-filter-harness", title: "Filter by harness",
+            value: harnessFilter,
+            onChange: function (e) { setHarnessFilter(e.target.value); },
+          },
+            h("option", { value: "all" }, "All harnesses"),
+            harnessOptions.map(function (s) {
+              return h("option", { key: s, value: s }, s);
+            })
+          ),
+          h("select", {
+            className: "ao-input ao-filter-recency", title: "Filter by recent activity",
+            value: recency,
+            onChange: function (e) { setRecencyPersisted(e.target.value); },
+          },
+            RECENCY_OPTIONS.map(function (r) {
+              return h("option", { key: r.id, value: r.id }, r.label);
+            })
+          ),
+          h("button", {
+            className: "ao-btn ao-btn-toggle" + (activeOnly ? " is-on" : ""),
+            title: "Hide terminated, exited and archived sessions",
+            onClick: toggleActiveOnly,
+          }, activeOnly ? "● Active only" : "○ Show all"),
           h("select", {
             className: "ao-input ao-status-filter", value: statusFilter,
             onChange: function (e) { setStatusFilter(e.target.value); },
