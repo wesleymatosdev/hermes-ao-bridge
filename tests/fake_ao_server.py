@@ -42,6 +42,8 @@ class FakeAO:
         self.conversation_requests: list[str] = []   # conversation fetches seen
         self.created: list[dict] = []            # spawn payloads seen
         self.sends: list[dict] = []              # send payloads seen
+        self.steers: list[dict] = []             # steer-or-send payloads seen
+        self.steer_error: Optional[tuple] = None  # (code, status, message) to answer instead
         self.killed: list[str] = []
         self.healthz_ok = True
         self.spawn_status = 201
@@ -136,6 +138,32 @@ class _Handler(BaseHTTPRequestHandler):
                 return self._json(ao.spawn_status, {"error": "boom"})
             return self._json(201, {"session": {"id": session_id,
                                                 "displayName": body.get("displayName") or session_id}})
+        if path.endswith("/conversation/steer-or-send"):
+            session = ao.sessions_by_id.get(self._session_id())
+            if session is None:
+                return self._json(404, {"error": "not found"})
+            # Wire truth (live daemon + AO backend source, 2026-11-09): the
+            # steer body is {"text", "clientMessageId"} — "text", not "message",
+            # and the idempotency handle is REQUIRED (no handle → the daemon
+            # answers 409 CHAT_STEER_UNCERTAIN, not a validation error).
+            if not str(body.get("text") or "").strip():
+                return self._json(400, {"error": "validation", "code": "CHAT_STEER_TEXT_REQUIRED",
+                                        "message": "steer text is required", "requestId": "fake"})
+            if not str(body.get("clientMessageId") or ""):
+                return self._json(409, {"error": "conflict", "code": "CHAT_STEER_UNCERTAIN",
+                                        "message": "the provider may have received this guidance",
+                                        "requestId": "fake"})
+            ao.steers.append({"session_id": self._session_id(), "body": body})
+            if ao.steer_error is not None:
+                code, status, message = ao.steer_error
+                return self._json(status, {"error": "conflict", "code": code,
+                                           "message": message, "requestId": "fake"})
+            # The daemon steers a working session and queues a turn on an idle one.
+            outcome = "steered" if session.get("status") == "working" else "sent"
+            return self._json(202, {"outcome": outcome, "turnId": "t-fake",
+                                    "providerTurnId": "pt-fake",
+                                    "state": "running" if outcome == "steered" else "queued",
+                                    "duplicate": False})
         if path.endswith("/send"):
             session = ao.sessions_by_id.get(self._session_id())
             if session is None:

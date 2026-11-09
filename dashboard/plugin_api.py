@@ -17,6 +17,13 @@ AO wire contract (verified against the live daemon and the AO backend source):
 - GET  /api/v1/sessions                        -> {"sessions": [...]}
 - POST /api/v1/sessions                        spawn (201, {"session": {...}})
 - POST /api/v1/sessions/{id}/send              {"message", "userAuthored"}
+- POST /api/v1/sessions/{id}/conversation/steer-or-send
+                                               {"text", "clientMessageId"} -> 202
+                                               {"outcome": "steered"|"sent", ...};
+                                               body field is "text" (not "message"),
+                                               the idempotency handle is REQUIRED
+                                               (missing -> 409 CHAT_STEER_UNCERTAIN),
+                                               messages land with origin=human
 - POST /api/v1/sessions/{id}/kill
 - GET  /api/v1/reports?projectId=<id>          -> {"reports": [...]} (relay, opt-in)
 """
@@ -33,6 +40,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 from pathlib import Path
 from typing import Any, Optional
 
@@ -166,10 +174,13 @@ def open_in_ao_links() -> bool:
 class AOApiError(Exception):
     """AO daemon answered with a non-2xx status."""
 
-    def __init__(self, status: int, message: str):
+    def __init__(self, status: int, message: str, code: str = ""):
         super().__init__(message)
         self.status = status
         self.message = message
+        # The daemon's machine-readable error code ("CHAT_STEER_TEXT_REQUIRED",
+        # ...) from {"error", "code", "message"} bodies; "" when absent.
+        self.code = code
 
     @property
     def is_gone(self) -> bool:
@@ -213,9 +224,11 @@ class AOClient:
             try:
                 detail = json.loads(err.read() or b"{}")
                 message = detail.get("message") or detail.get("error") or err.reason
+                code = str(detail.get("code") or "") if isinstance(detail, dict) else ""
             except (ValueError, AttributeError):
                 message = err.reason
-            raise AOApiError(err.code, str(message)) from err
+                code = ""
+            raise AOApiError(err.code, str(message), code=code) from err
         except (urllib.error.URLError, OSError) as err:
             raise AOConnectionError(f"AO daemon unreachable at {self.base_url}: {err}",
                                     base_url=self.base_url) from err
@@ -271,6 +284,18 @@ class AOClient:
         sid = urllib.parse.quote(session_id, safe="")
         return self.request("POST", f"/api/v1/sessions/{sid}/send",
                             {"message": message, "userAuthored": user_authored})
+
+    def steer_or_send(self, session_id: str, text: str, client_message_id: str) -> dict:
+        """AO-native steer-or-send: steers a session whose turn is in flight,
+        queues a new turn on an idle one (verified live, 2026-11-09). Wire
+        quirks that are easy to get wrong: the body field is ``text`` (not
+        ``message``), and the daemon REQUIRES the ``clientMessageId``
+        idempotency handle — without it every request answers 409
+        CHAT_STEER_UNCERTAIN. Messages land with origin=human, so they render
+        as "End user" in the transcript."""
+        sid = urllib.parse.quote(session_id, safe="")
+        return self.request("POST", f"/api/v1/sessions/{sid}/conversation/steer-or-send",
+                            {"text": text, "clientMessageId": client_message_id})
 
     def kill(self, session_id: str) -> dict:
         sid = urllib.parse.quote(session_id, safe="")
@@ -488,7 +513,7 @@ class SendBody(BaseModel):
 
 def _error_detail(kind: str, message: str, retryable: bool,
                   upstream_status: Optional[int] = None,
-                  base_url: str = "") -> dict:
+                  base_url: str = "", code: str = "") -> dict:
     """The typed error payload every failure path returns. ``pluginVersion``
     rides along so even an error response lets the frontend run the skew check
     (an erroring stale backend must still be identifiable)."""
@@ -498,6 +523,8 @@ def _error_detail(kind: str, message: str, retryable: bool,
         detail["upstreamStatus"] = upstream_status
     if base_url:
         detail["baseUrl"] = base_url
+    if code:
+        detail["code"] = code
     return detail
 
 
@@ -518,6 +545,41 @@ def _raise_mapped(err: AOApiError) -> None:
     raise HTTPException(status_code=err.status, detail=_error_detail(
         "upstream_error", str(err.message) or "AO daemon error",
         retryable=err.is_transient, upstream_status=err.status))
+
+
+# Steer refusal codes from the daemon's writeSteerError mapping (AO backend
+# source, 2026-11-09) that deserve board-facing wording or a retryability
+# verdict. ``None`` message = carry the daemon's own prose through (it names
+# the concrete cause, e.g. which kind of turn is in the way). Codes outside
+# this table fall through to the generic upstream mapping with the code attached.
+STEER_ERROR_HINTS = {
+    "CHAT_STEER_TEXT_REQUIRED": ("validation", "Message must not be empty", False),
+    "CHAT_STEER_UNSUPPORTED": (
+        "conflict",
+        "This session's harness can't take guidance mid-turn — send it after the "
+        "turn ends instead",
+        False),
+    "CHAT_TURN_NOT_STEERABLE": ("conflict", None, True),
+    "CHAT_STEER_UNCERTAIN": (
+        "conflict",
+        "The daemon could not confirm delivery — check the transcript before resending",
+        False),
+    "CHAT_STEER_IDEMPOTENCY_CONFLICT": ("conflict", None, False),
+    "CHAT_UNSUPPORTED_STEER_CONTENT": ("validation", None, False),
+}
+
+
+def _raise_steer_error(err: AOApiError) -> None:
+    """Steer-route error mapping: the daemon's CHAT_* code rides in the typed
+    payload (so the UI and tests can key on it), connection/gone cases keep
+    the shared mapping."""
+    if isinstance(err, AOConnectionError) or err.is_gone:
+        _raise_mapped(err)
+    kind, message, retryable = STEER_ERROR_HINTS.get(
+        err.code or "", ("upstream_error", None, err.is_transient))
+    raise HTTPException(status_code=err.status, detail=_error_detail(
+        kind, message or err.message, retryable=retryable,
+        upstream_status=err.status, code=err.code))
 
 
 # ---------------------------------------------------------------------------
@@ -576,6 +638,25 @@ def send(session_id: str, body: SendBody):
     return {"ok": True, "sessionId": session_id}
 
 
+@router.post("/sessions/{session_id}/steer")
+def steer(session_id: str, body: SendBody):
+    """Steer-or-send — the AO-native message delivery (NOT the queue-only
+    /send): a session whose turn is in flight gets steered mid-turn, an idle
+    one gets a new turn. The idempotency handle is minted here per request;
+    the daemon rejects a duplicate handle, so a client retry with the same
+    text mints a new handle and is a deliberate second delivery."""
+    ao = client()
+    if not body.message.strip():
+        raise HTTPException(status_code=422, detail="Message must not be empty")
+    try:
+        resp = ao.steer_or_send(session_id, body.message,
+                                client_message_id=uuid.uuid4().hex)
+    except AOApiError as err:
+        _raise_steer_error(err)
+    return {"ok": True, "sessionId": session_id,
+            "outcome": (resp or {}).get("outcome") or "sent"}
+
+
 @router.post("/sessions/{session_id}/kill")
 def kill(session_id: str):
     ao = client()
@@ -600,6 +681,13 @@ ACTIVITY_TAIL_COUNT = 400
 TOOL_OUTPUT_MAX_CHARS = 4000
 TOOL_INPUT_MAX_CHARS = 1000
 
+# Steered guidance rides the conversation as a ``system`` activity, not a
+# message row (wire truth, live steer probe 2026-11-09: detail.event ==
+# "steer", detail.text is the steered text, detail.origin its provenance).
+# Without surfacing it, a steered message never shows in the transcript —
+# the sender wouldn't see their own text after the daemon confirmed delivery.
+STEER_ACTIVITY_EVENT = "steer"
+
 
 def _bounded(text: str, limit: int) -> tuple[str, bool]:
     return (text, False) if len(text) <= limit else (text[:limit], True)
@@ -620,6 +708,20 @@ def _thinking_preview(text: str) -> str:
 def activity_for(act: dict) -> Optional[dict]:
     """Reduce one conversation activity to what the transcript row renders."""
     kind = act.get("activityKind")
+    if kind == "system":
+        detail = act.get("detail")
+        if not isinstance(detail, dict) or detail.get("event") != STEER_ACTIVITY_EVENT:
+            return None  # non-steer system events are not transcript surface
+        text, truncated = _bounded(
+            str(detail.get("text") or act.get("summary") or ""), TOOL_OUTPUT_MAX_CHARS)
+        return {"id": act.get("id") or "",
+                "activityKind": "steer",
+                "status": act.get("status") or "",
+                "summary": act.get("summary") or "",
+                "sequence": act.get("sequence"),
+                "text": text,
+                "textTruncated": truncated,
+                "origin": detail.get("origin") or ""}
     if kind not in TOOL_ACTIVITY_KINDS:
         return None
     detail = act.get("detail") or {}

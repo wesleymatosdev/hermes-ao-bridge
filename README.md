@@ -35,9 +35,9 @@ An **AO Bridge** tab appears in the dashboard.
 mapped from live AO session state (exact rules below). Cards show project,
 session name, harness icon, status, branch, age, and PR links, and working
 cards show the worker's current plan step. Spawn workers with the **+ Spawn
-worker** form (project, harness, name, initial prompt), send messages to live
-sessions, and archive sessions (with confirmation — archiving terminates the
-session via the daemon).
+worker** form (project, harness, name, initial prompt), steer and message
+sessions without leaving the board, and archive sessions (with confirmation —
+archiving terminates the session via the daemon).
 
 | AO session state | Board column |
 |---|---|
@@ -66,8 +66,8 @@ which mode you're in.
 **Card detail.** Click a card for the session's metadata, its live plan, and
 the conversation transcript as an iMessage-style chat, color-coded by sender
 class: **Worker** turns (the agent's output), **End user** messages (typed in
-the AO app), and **Orchestrator / automation** (everything injected over the
-REST API — including messages sent from this board). Each class has a
+the AO app or sent from this board), and **Orchestrator / automation**
+(everything injected over the legacy queue-only REST path). Each class has a
 click-to-hide filter chip, and classification keys on the daemon's `origin`
 field — the `userAuthored` flag senders pass is self-declared and is never
 treated as proof of human authorship. The sheet opens at the latest message
@@ -94,6 +94,20 @@ line per execution with an exit glyph (✓ / ✗ / spinner), click to expand the
 full command, input or output (outputs capped at 4,000 characters, last 400
 activities). The worker's plan renders as a checklist in the sheet and as a
 one-line "current step" on working cards.
+
+**Steer and message workers from the board.** The detail sheet ends in a
+message composer, and every live card has a **Message** affordance that opens
+the sheet with the composer focused — one click to steer. Delivery uses the
+daemon's steer-or-send operation, the same one the AO app types into: a
+session whose turn is in flight gets your text steered into that turn; an
+idle session gets it as a new turn. Sent messages land with `origin=human`,
+so they render as **End user** and (with the sheet open) appear in the
+transcript through the live follow right after the send. Feedback is honest
+per outcome — *"Sent — steered into the working turn"* vs *"Sent — new turn
+queued"* — and daemon refusals (empty text, a harness that can't take
+mid-turn guidance, uncertain delivery) surface inline with the daemon's error
+code. The legacy queue-only `/send` route stays on the backend for
+compatibility.
 
 **Orchestrators.** AO orchestrator sessions (they coordinate workers; they
 don't carry worker state) never enter the Kanban columns or their counters.
@@ -315,7 +329,8 @@ the AO daemon with `urllib`:
 | `GET /health`, `GET /board` | `GET /healthz`; `GET /api/v1/projects` + `GET /api/v1/sessions` (+ `GET /api/v1/sessions/{id}/conversation` for plan steps) |
 | `GET /sessions/{id}/detail` | `GET /api/v1/sessions/{id}` + `…/conversation` |
 | `POST /spawn` | `POST /api/v1/sessions` (kind `worker`) |
-| `POST /sessions/{id}/send` | `POST /api/v1/sessions/{id}/send` |
+| `POST /sessions/{id}/steer` | `POST /api/v1/sessions/{id}/conversation/steer-or-send` (steer-or-send; mints the required `clientMessageId`) |
+| `POST /sessions/{id}/send` | `POST /api/v1/sessions/{id}/send` (legacy queue-only, kept for compatibility) |
 | `POST /sessions/{id}/kill` | `POST /api/v1/sessions/{id}/kill` |
 | `GET /relay`, `GET /relay/sessions` | `GET /api/v1/reports?projectId=…` (relay only) |
 | `WS /events` | board + detail pushes; server-polls the routes above |
@@ -329,7 +344,8 @@ network, stdlib `unittest` only:
 
 (Any Python with `fastapi` works; the suite isolates `HERMES_HOME` to a
 throwaway directory.) Coverage: the AO client, column mapping, the FastAPI
-router (board assembly, spawn/send/kill, error mapping, detail shape and
+router (board assembly, spawn/send/steer/kill, steer error-shape mapping,
+detail shape and
 bounding, WebSocket stream, outage recovery, version-skew binding), plan
 parsing, and the relay (event extraction, batching, dedup, delivery).
 

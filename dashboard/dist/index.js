@@ -341,7 +341,11 @@
         card.column !== "archive" && card.column !== "done"
           ? h("button", {
               className: "ao-btn ao-btn-ghost", disabled: !!busy,
-              onClick: function (e) { props.onSend(card, e); },
+              title: "Open the session and steer it — one click to message",
+              onClick: function (e) {
+                e.stopPropagation();
+                props.onMessage(card);
+              },
             }, "Message")
           : null,
         card.column !== "archive"
@@ -371,7 +375,7 @@
             cards.length === 0
               ? h("div", { className: "ao-column-empty" }, "No sessions")
               : cards.map(function (c) {
-                  return h(Card, { key: c.id, card: c, iconMap: props.iconMap, openLinks: props.openLinks, onChanged: props.onChanged, onSend: props.onSend, onOpen: props.onOpen });
+                  return h(Card, { key: c.id, card: c, iconMap: props.iconMap, openLinks: props.openLinks, onChanged: props.onChanged, onMessage: props.onMessage, onOpen: props.onOpen });
                 })
           )
     );
@@ -510,48 +514,79 @@
     );
   }
 
-  // --- Send-message sheet --------------------------------------------------
+  // --- Detail-sheet composer -------------------------------------------------
+  // Messages from the board ride the daemon's steer-or-send route (wire truth
+  // probed live, 2026-11-09): a working session is steered mid-turn, an idle
+  // one gets a new turn — AO-native semantics from one route. The daemon
+  // records origin=human, so board messages render as "End user" and arrive
+  // in the transcript through the sheet's live WS follow right after the send.
 
-  function SendSheet(props) {
-    const [message, setMessage] = useState("");
+  function Composer(props) {
+    const [text, setText] = useState("");
     const [busy, setBusy] = useState(false);
     const [err, setErr] = useState(null);
+    const [sentNote, setSentNote] = useState("");
+    const taRef = useRef(null);
 
-    function submit(e) {
-      e.preventDefault();
-      if (busy || !message.trim()) return;
-      setBusy(true); setErr(null);
-      authedFetchJson(API + "/sessions/" + encodeURIComponent(props.session.id) + "/send", {
+    // One-click steer: the card "Message" affordance opens the sheet with the
+    // composer ready to type.
+    useEffect(function () {
+      if (props.focus && taRef.current) taRef.current.focus();
+    }, [props.focus]);
+
+    // The confirmation is feedback, not state — it fades so the next send
+    // starts from a clean slate.
+    useEffect(function () {
+      if (!sentNote) return;
+      const t = window.setTimeout(function () { setSentNote(""); }, 6000);
+      return function () { window.clearTimeout(t); };
+    }, [sentNote]);
+
+    function submit() {
+      if (busy) return;
+      if (!text.trim()) { setErr("Message must not be empty"); return; }
+      setBusy(true); setErr(null); setSentNote("");
+      authedFetchJson(API + "/sessions/" + encodeURIComponent(props.sessionId) + "/steer", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message: message, userAuthored: true }),
+        body: JSON.stringify({ message: text }),
       })
-        .then(function () { props.onClose(); props.onChanged(); })
+        .then(function (resp) {
+          setText("");
+          setSentNote(resp && resp.outcome === "steered"
+            ? "Sent — steered into the working turn"
+            : "Sent — new turn queued");
+        })
         .catch(function (e2) { setErr(parseApiErrorMessage(e2)); })
         .finally(function () { setBusy(false); });
     }
 
-    return h("div", { className: "ao-overlay ao-overlay-bottom", onClick: function (e) { if (e.target === e.currentTarget) props.onClose(); } },
-      h("form", { className: "ao-sheet ao-sheet-send", onSubmit: submit },
-        h("div", { className: "ao-sheet-title" }, "Message \u201C" + props.session.displayName + "\u201D"),
-        h("textarea", { className: "ao-input ao-textarea", rows: 4, autoFocus: true, value: message,
-                        placeholder: "Send a message to this session…",
-                        onChange: function (e) { setMessage(e.target.value); } }),
-        err ? h("div", { className: "ao-sheet-error" }, err) : null,
-        h("div", { className: "ao-sheet-actions" },
-          h("button", { type: "button", className: "ao-btn ao-btn-ghost", onClick: props.onClose }, "Cancel"),
-          h("button", { type: "submit", className: "ao-btn ao-btn-primary", disabled: busy || !message.trim() },
-            busy ? "Sending…" : "Send")
-        )
-      )
-    );
+    return h("div", { className: "ao-composer" },
+      h("textarea", {
+        ref: taRef, className: "ao-input ao-textarea ao-composer-input", rows: 2,
+        value: text,
+        placeholder: props.working
+          ? "Steer this session — delivered while it works…"
+          : "Message this session…",
+        onChange: function (e) { setText(e.target.value); },
+        onKeyDown: function (e) {
+          if ((e.metaKey || e.ctrlKey) && e.key === "Enter") { e.preventDefault(); submit(); }
+        },
+      }),
+      err ? h("div", { className: "ao-sheet-error" }, err) : null,
+      sentNote ? h("div", { className: "ao-composer-sent" }, sentNote) : null,
+      h("div", { className: "ao-composer-actions" },
+        h("span", { className: "ao-composer-hint" }, "⌘⏎ to send"),
+        h("button", { className: "ao-btn ao-btn-primary", disabled: busy || !text.trim(),
+                      onClick: submit }, busy ? "Sending…" : "Send")));
   }
 
   // --- Card detail: message classes -----------------------------------------
   // Three classes over the daemon's wire truth (probed live, 2026-11-09):
-  // origin is the reliable provenance signal — "human" only for messages
-  // typed in the AO app, "automation" for every REST /send call regardless
-  // of the userAuthored flag, "provider" for assistant turns. authoredByUser
+  // origin is the reliable provenance signal — "human" for messages typed in
+  // the AO app AND for the board's composer (the steer-or-send route records
+  // origin=human), "automation" for the legacy REST /send call regardless of
+  // the userAuthored flag, "provider" for assistant turns. authoredByUser
   // is self-declared by the sender and proves nothing (an orchestrator can
   // pass userAuthored: true), so it is never used to claim "End user":
   //   worker       — assistant turns (the harness's own output)
@@ -559,8 +594,8 @@
   //   orchestrator — everything else non-assistant (Orchestrator / automation)
   const MSG_CLASSES = {
     worker: { label: "Worker", title: "The harness's own output (assistant turns)" },
-    user: { label: "End user", title: "Typed by the session's user in the AO app (origin=human)" },
-    orchestrator: { label: "Orchestrator / automation", title: "Injected via the REST /send path (origin=automation), or otherwise not a human or worker turn" },
+    user: { label: "End user", title: "Typed by the user — in the AO app or on this board (origin=human)" },
+    orchestrator: { label: "Orchestrator / automation", title: "Injected via the legacy queue-only REST /send path (origin=automation), or otherwise not a human or worker turn" },
   };
 
   function messageClass(m) {
@@ -668,9 +703,10 @@
   }
 
   // Merge transcript messages and tool activities into one sequence-ordered
-  // timeline. Message-class filters apply to messages; the one activity kind
-  // that follows them is reasoning: thinking is worker output, so the Worker
-  // chip hides it too (no Thinking chip of its own).
+  // timeline. Message-class filters apply to messages and to the activity
+  // kinds that follow them: thinking is worker output (Worker chip), steered
+  // guidance is End-user authored (End-user chip) even though it arrives as
+  // an activity.
   function timelineItems(transcript, activities, hiddenClasses) {
     const msgs = (transcript || [])
       .filter(function (m) { return !hiddenClasses[messageClass(m)] && bubbleText(m); })
@@ -679,6 +715,7 @@
       .filter(function (a) {
         if (a.activityKind === "plan") return false;
         if (a.activityKind === "reasoning" && hiddenClasses.worker) return false;
+        if (a.activityKind === "steer") return !hiddenClasses.user;
         return true;
       })
       .map(function (a) { return { kind: "activity", seq: a.sequence, item: a }; });
@@ -850,10 +887,18 @@
             chatItems.length === 0
               ? h("div", { className: "ao-column-empty" }, "Nothing to show in the selected classes")
               : chatItems.map(function (it, i) {
-                  if (it.kind === "activity")
+                  if (it.kind === "activity") {
+                    // Steered guidance: daemon-recorded with origin=human, so it
+                    // renders as an End-user bubble, not a tool row.
+                    if (it.item.activityKind === "steer")
+                      return h("div", { key: "s" + (it.item.id || i), className: "ao-chat-row ao-chat-user" },
+                        h("div", { className: "ao-chat-col" },
+                          h("span", { className: "ao-chat-sender" }, MSG_CLASSES.user.label),
+                          h("div", { className: "ao-bubble" }, bubbleText({ text: it.item.text }))));
                     return it.item.activityKind === "reasoning"
                       ? h(ThinkingRow, { key: "a" + (it.item.id || i), activity: it.item })
                       : h(ToolRow, { key: "a" + (it.item.id || i), activity: it.item });
+                  }
                   const m = it.item;
                   const cls = messageClass(m);
                   return h("div", { key: "m" + (m.sequence != null ? m.sequence : i), className: "ao-chat-row ao-chat-" + cls },
@@ -868,7 +913,15 @@
                   onClick: function () { setFollow(true); scrollToBottom(); },
                 }, "↓ Jump to latest")
               : null
-          )
+          ),
+          // The composer rides the transcript: steer-or-send works for a
+          // working session (mid-turn steer) and an idle one (new turn).
+          // Archived sessions are terminated — there is nothing to message.
+          session.column !== "archive"
+            ? h(Composer, { sessionId: session.id,
+                            focus: props.focusComposer,
+                            working: ((detail && detail.session.status) || session.status || "") === "working" })
+            : null
         ) : null,
         h("div", { className: "ao-sheet-actions" },
           h("button", { type: "button", className: "ao-btn ao-btn-ghost", onClick: props.onClose }, "Close")
@@ -928,7 +981,10 @@
     const [live, setLive] = useState(false);
     const [refreshedAt, setRefreshedAt] = useState(null);
     const [spawnOpen, setSpawnOpen] = useState(false);
-    const [sendTarget, setSendTarget] = useState(null);
+    // The card detail sheet hosts the composer; `focusComposer` marks the
+    // "Message" quick-action path — the sheet opens with the composer focused
+    // (one click to steer a working session).
+    const [focusComposer, setFocusComposer] = useState(false);
     const [detailTargetId, setDetailTargetId] = useState(null);
     // Derive the detail card from the live board so the sheet re-renders (and
     // refetches, via the plan-writtenAt effect below) on WS pushes. A click
@@ -1294,8 +1350,12 @@
                     openLinks: !!(data && data.openInAoLinks),
                     collapsed: col.id === "archive" && collapsed,
                     onToggle: col.id === "archive" ? toggleArchive : undefined,
-                    onChanged: refresh, onSend: setSendTarget,
-                    onOpen: function (card) { setDetailTargetId(card.id); },
+                    onChanged: refresh,
+                    onMessage: function (card) {
+                      setDetailTargetId(card.id);
+                      setFocusComposer(true);
+                    },
+                    onOpen: function (card) { setDetailTargetId(card.id); setFocusComposer(false); },
                   });
                 })),
             ],
@@ -1313,18 +1373,12 @@
             },
           })
         : null,
-      sendTarget
-        ? h(SendSheet, {
-            session: sendTarget,
-            onClose: function () { setSendTarget(null); },
-            onChanged: function () { setSendTarget(null); refresh(); },
-          })
-        : null,
       detailCard
         ? h(DetailSheet, {
             session: detailCard,
+            focusComposer: focusComposer,
             openLinks: !!(data && data.openInAoLinks),
-            onClose: function () { setDetailTargetId(null); },
+            onClose: function () { setDetailTargetId(null); setFocusComposer(false); },
           })
         : null
     );

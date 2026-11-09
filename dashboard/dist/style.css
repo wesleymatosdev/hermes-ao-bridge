@@ -531,11 +531,6 @@
   box-shadow: 0 18px 60px rgba(0, 0, 0, 0.55);
 }
 
-.ao-overlay-bottom .ao-sheet-send {
-  margin-bottom: 24px;
-  width: min(720px, calc(100vw - 40px));
-}
-
 .ao-sheet-title {
   font-size: 15px;
   font-weight: 700;
@@ -673,6 +668,48 @@
 
 /* Sticky "jump to latest" pill: appears when the user scrolls up (follow
    unpins), sticks to the visible bottom of the transcript while scrolled. */
+/* --- detail-sheet composer -------------------------------------------------
+   Rides the transcript container, under the chat: one route (steer-or-send)
+   covers steering a working session and messaging an idle one. */
+
+.ao-composer {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  border-top: 1px solid var(--ao-border);
+  padding-top: 8px;
+  /* The transcript container scrolls (420px cap); the composer sticks to its
+     visible bottom so the message box never scrolls out of reach. */
+  position: sticky;
+  bottom: 0;
+  background: linear-gradient(180deg, rgba(24, 28, 54, 0.97), rgba(14, 17, 34, 0.97));
+  padding-bottom: 2px;
+}
+
+.ao-composer-input {
+  width: 100%;
+  box-sizing: border-box;
+  min-height: 44px;
+}
+
+.ao-composer-actions {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 10px;
+}
+
+.ao-composer-hint {
+  font-size: 10.5px;
+  color: var(--ao-text-dim);
+  margin-right: auto;
+}
+
+.ao-composer-sent {
+  font-size: 12px;
+  color: var(--ao-good);
+}
+
 .ao-jump-latest {
   position: sticky;
   bottom: 10px;
