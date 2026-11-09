@@ -20,8 +20,8 @@ agent work.
 ## Install
 
 ```bash
-hermes plugins install <path-or-repo>   # or copy this directory into ~/.hermes/plugins/
-hermes plugins enable ao-bridge         # user plugins are opt-in by design
+hermes plugins install wesleymatosdev/hermes-ao-bridge   # or copy this directory into ~/.hermes/plugins/
+hermes plugins enable ao-bridge                          # user plugins are opt-in by design
 ```
 
 Then **restart the dashboard**: the plugin's backend imports once at dashboard
