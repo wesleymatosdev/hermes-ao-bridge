@@ -345,6 +345,14 @@
     return "orchestrator";
   }
 
+  // Harness transcripts carry leading/trailing blank-line artifacts ("\n\n"
+  // before an assistant turn); white-space: pre-wrap would render them as empty
+  // bands inside the bubble, so trim the ends for display only — the /detail
+  // endpoint stays raw.
+  function bubbleText(m) {
+    return String(m.text == null ? "" : m.text).replace(/^\s+|\s+$/g, "");
+  }
+
   // --- Detail sheet (card click; read-only) --------------------------------
 
   function DetailSheet(props) {
@@ -399,16 +407,16 @@
               }, (off ? "\u25CB " : "\u25CF ") + MSG_CLASSES[id].label);
             })),
           h("div", { className: "ao-chat" },
-            (detail.transcript || []).filter(function (m) { return !hiddenClasses[messageClass(m)]; }).length === 0
+            (detail.transcript || []).filter(function (m) { return !hiddenClasses[messageClass(m)] && bubbleText(m); }).length === 0
               ? h("div", { className: "ao-column-empty" }, "No messages in the shown classes")
               : (detail.transcript || [])
-                  .filter(function (m) { return !hiddenClasses[messageClass(m)]; })
+                  .filter(function (m) { return !hiddenClasses[messageClass(m)] && bubbleText(m); })
                   .map(function (m, i) {
                     const cls = messageClass(m);
                     return h("div", { key: i, className: "ao-chat-row ao-chat-" + cls },
                       h("div", { className: "ao-chat-col" },
                         h("span", { className: "ao-chat-sender" }, MSG_CLASSES[cls].label),
-                        h("div", { className: "ao-bubble" }, m.text)));
+                        h("div", { className: "ao-bubble" }, bubbleText(m))));
                   }))
         ) : null,
         h("div", { className: "ao-sheet-actions" },
