@@ -533,6 +533,7 @@ def kill(session_id: str):
 
 
 TRANSCRIPT_TAIL_LINES = 200
+ACTIVITY_TAIL = 12
 
 # Tool-execution activities rendered in the transcript (wire truth probed on
 # the live daemon, 2026-11-09: entries with activityKind command | mcp_tool |
@@ -613,21 +614,20 @@ def ao_deep_link(project_id: str, session_id: str) -> str:
     return f"ao://sessions/{sid}"
 
 
-@router.get("/sessions/{session_id}/detail")
-def detail(session_id: str):
+def detail_payload(ao: AOClient, session_id: str) -> dict:
     """Read-only card detail: session metadata + bounded transcript tail +
-    tool-execution activities."""
-    ao = client()
-    sess: dict = {}
-    conv: dict = {}
-    try:
-        sess = ao.get_session(session_id)
-        conv = ao.conversation(session_id)
-    except AOApiError as err:
-        _raise_mapped(err)
+    tool-execution activities.
+
+    Shared by the REST detail route and the WS watch push so the sheet sees
+    exactly one payload shape on both paths. Raises ``AOApiError``; the REST
+    route maps it, the WS loop handles it.
+    """
+    sess = ao.get_session(session_id)
+    conv = ao.conversation(session_id)
     messages = conv.get("messages") or []
     if not isinstance(messages, list):
         messages = []
+    turns = conv.get("turns") if isinstance(conv.get("turns"), list) else []
     tail = messages[-TRANSCRIPT_TAIL_LINES:]
     project_id = sess.get("projectId") or ""
     activity = sess.get("activity") or {}
@@ -669,14 +669,27 @@ def detail(session_id: str):
         "activities": tools["activities"],
         "activitiesTotal": tools["activitiesTotal"],
         "plan": latest_plan(conv),
+        # The running turn's state — intra-turn progress the session list
+        # never carries (the list row is static for a whole turn).
+        "turnState": (turns[0].get("state") or "") if turns else "",
     }
+
+
+@router.get("/sessions/{session_id}/detail")
+def detail(session_id: str):
+    """Read-only card detail: session metadata + bounded transcript tail."""
+    ao = client()
+    try:
+        return detail_payload(ao, session_id)
+    except AOApiError as err:
+        _raise_mapped(err)
 
 
 # ---------------------------------------------------------------------------
 # Live updates: WS stream (server polls the AO daemon, pushes diffs)
 # ---------------------------------------------------------------------------
 
-EVENT_POLL_SECONDS = 1.0
+EVENT_POLL_SECONDS = 0.5
 
 
 def _ws_upgrade_authorized(ws: WebSocket) -> bool:
@@ -697,12 +710,29 @@ def _cards_digest(cards: list) -> str:
     ).hexdigest()
 
 
+def _ws_watch_target(msg: dict) -> Optional[str]:
+    """Extract a watch target from a client frame, else None.
+
+    ``{"type": "watch", "sessionId": "<id>"}`` asks the stream to also push
+    that session's detail payload (transcript, plan, turn state) while it
+    changes — the detail sheet's live-follow channel.
+    """
+    if not isinstance(msg, dict) or msg.get("type") != "watch":
+        return None
+    sid = str(msg.get("sessionId") or "").strip()
+    return sid or None
+
+
 @router.websocket("/events")
 async def events(ws: WebSocket):
     """Push board snapshots when AO state changes (server polls at ~1s).
 
     Sends ``{"type": "board", "board": <board snapshot>}`` only when the card
-    set changed, so an idle daemon costs the client nothing.
+    set changed, so an idle daemon costs the client nothing. A client may add
+    ``{"type": "watch", "sessionId": id}`` to also receive
+    ``{"type": "detail", "sessionId": id, "detail": <detail payload>}`` pushes
+    whenever that session's transcript, plan or turn state changes — the card
+    detail sheet uses this to follow new messages live.
     """
     if not _ws_upgrade_authorized(ws):
         await ws.close(code=1008)
@@ -710,14 +740,33 @@ async def events(ws: WebSocket):
     await ws.accept()
     last_digest: Optional[str] = None
     upstream_down = False
+    watch_sid: Optional[str] = None
+    watch_digest: Optional[str] = None
     try:
         while True:
+            got_frame = False
             try:
                 msg = await asyncio.wait_for(ws.receive(), timeout=EVENT_POLL_SECONDS)
+                got_frame = True
                 if msg.get("type") == "websocket.disconnect":
                     return
             except TimeoutError:
                 pass  # no client message — poll the daemon
+            if got_frame:
+                text = msg.get("text")
+                if isinstance(msg.get("bytes"), (bytes, bytearray)):
+                    try:
+                        text = bytes(msg["bytes"]).decode("utf-8", "replace")
+                    except Exception:
+                        text = None
+                if isinstance(text, str) and text:
+                    try:
+                        target = _ws_watch_target(json.loads(text))
+                    except ValueError:
+                        target = None
+                    if target and target != watch_sid:
+                        watch_sid = target
+                        watch_digest = None  # force one push for the new target
             try:
                 snap = await asyncio.to_thread(board_snapshot, client())
             except AOApiError as err:
@@ -747,6 +796,18 @@ async def events(ws: WebSocket):
             if digest != last_digest:
                 last_digest = digest
                 await ws.send_json({"type": "board", "board": snap})
+            if watch_sid:
+                try:
+                    payload = await asyncio.to_thread(detail_payload, client(), watch_sid)
+                except AOApiError as err:
+                    if err.is_gone:
+                        watch_sid = None  # session vanished: drop the watch
+                    continue
+                d_digest = _cards_digest(payload)
+                if d_digest != watch_digest:
+                    watch_digest = d_digest
+                    await ws.send_json({"type": "detail", "sessionId": watch_sid,
+                                        "detail": payload})
     except WebSocketDisconnect:
         return
     except asyncio.CancelledError:

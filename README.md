@@ -116,6 +116,14 @@ retry banner (see *Daemon-outage resilience* below).
   endpoint (any orchestrator can pass `userAuthored: true`), so it never
   grants the "End user" class; Worker = assistant turns, End user =
   `origin: "human"`, everything else = Orchestrator / automation.
+  Live follow (v0.3.1): the sheet opens at the **latest** message (not the
+  first) and follows new ones while open — it sends `{"type": "watch",
+  "sessionId"}` over the plugin's `/events` WS and re-renders on
+  `{"type": "detail"}` pushes (transcript, tools, plan and turn state,
+  digest-gated, ≤ ~1s). Scrolling up unpins the follow and shows a sticky
+  **↓ Jump to latest** pill; scrolling back to the bottom (or clicking the
+  pill) re-pins. Without WS support the sheet falls back to a 2s poll of the
+  detail route.
 - **Tool executions in the transcript** (v0.3.0): the daemon's conversation
   activities (`command`, `mcp_tool`, `reasoning`) interleave with messages by
   their shared `sequence` number, kept visually quiet — one muted line per
@@ -281,6 +289,15 @@ is verified manually against a live board (see the resilience notes above).
 
 ## Known limitations
 
+- **Intra-turn card motion is bounded by the daemon.** The daemon's session
+  list is static for the whole length of a turn — status, activity and
+  `updatedAt` only move at turn/state transitions, and its `/api/v1/events`
+  stream carries no conversation/plan events. So a working card's status chip,
+  counts and plan step update within ~1s of any daemon-side change (the WS
+  poll loop pushes on every digest change), but the plan step itself only
+  refreshes on the plan cache's 15s TTL window while the turn runs. There is
+  no polling of every session to work around this; the detail sheet's watch
+  channel is the fine-grained live surface (≤ ~1s) for a single session.
 - Headless callers can't reach the plugin routes: the dashboard's auth
   middleware (basic hash / OAuth) protects plugin endpoints by design and
   cannot be bypassed by a third-party plugin. Scripts and agents should call

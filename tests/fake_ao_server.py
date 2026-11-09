@@ -38,6 +38,7 @@ class FakeAO:
         self.sessions_by_id: dict[str, dict] = {}
         self.conversations: dict[str, list[dict]] = {}
         self.activities: dict[str, list[dict]] = {}
+        self.turns: dict[str, list[dict]] = {}
         self.conversation_requests: list[str] = []   # conversation fetches seen
         self.created: list[dict] = []            # spawn payloads seen
         self.sends: list[dict] = []              # send payloads seen
@@ -56,6 +57,9 @@ class FakeAO:
 
     def set_activities(self, session_id: str, activities: list[dict]) -> None:
         self.activities[session_id] = activities
+
+    def set_turns(self, session_id: str, turns: list[dict]) -> None:
+        self.turns[session_id] = turns
 
     def session_ids(self) -> list[str]:
         return list(self.sessions_by_id.keys())
@@ -112,7 +116,8 @@ class _Handler(BaseHTTPRequestHandler):
             return self._json(200, {"sessionId": session_id,
                                     "latestSequence": len(ao.conversations.get(session_id) or []),
                                     "messages": ao.conversations.get(session_id) or [],
-                                    "activities": ao.activities.get(session_id) or []})
+                                    "activities": ao.activities.get(session_id) or [],
+                                    "turns": ao.turns.get(session_id) or []})
         session = ao.sessions_by_id.get(self._session_id())
         if session is None:
             return self._json(404, {"error": "not found"})

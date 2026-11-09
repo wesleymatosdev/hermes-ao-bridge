@@ -534,12 +534,41 @@
   }
 
   // --- Detail sheet (card click; read-only) --------------------------------
+  // Opens at the LATEST message and follows new ones while open: the sheet
+  // watches the session over the plugin's /events WS ("watch" -> "detail"
+  // pushes; the watch payload includes the live plan, so the plan updates
+  // in place too without the writtenAt refetch) and pins the transcript to
+  // the bottom. Scrolling up unpins and shows a sticky "Jump to latest"
+  // pill; scrolling back to the bottom (or clicking the pill) re-pins.
+  // Without WS support it falls back to a 2s poll of the detail route.
 
   function DetailSheet(props) {
     const [detail, setDetail] = useState(null);
     const [err, setErr] = useState(null);
     const [hiddenClasses, setHiddenClasses] = useState({});
+    const [pinned, setPinned] = useState(true);
+    const [wsFailed, setWsFailed] = useState(false);
+    const [live, setLive] = useState(false);
+    const chatRef = useRef(null);
+    const pinnedRef = useRef(true);
     const session = props.session;
+
+    function setFollow(v) {
+      pinnedRef.current = v;
+      setPinned(v);
+    }
+
+    function scrollToBottom() {
+      const el = chatRef.current;
+      if (el) el.scrollTop = el.scrollHeight;
+    }
+
+    function onChatScroll() {
+      const el = chatRef.current;
+      if (!el) return;
+      const atBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 24;
+      if (atBottom !== pinnedRef.current) setFollow(atBottom);
+    }
 
     function toggleClass(id) {
       setHiddenClasses(function (prev) {
@@ -550,20 +579,70 @@
       });
     }
 
-    // Refetch when the session changes OR when its plan changes on a board
-    // push (plan.writtenAt) — the sheet tracks the live plan like the board does.
-    const planWrittenAt = (session.plan && session.plan.writtenAt) || "";
     useEffect(function () {
       let alive = true;
       setDetail(null); setErr(null);
+      setFollow(true); setLive(false); setWsFailed(false);
       authedFetchJson(API + "/sessions/" + encodeURIComponent(session.id) + "/detail")
         .then(function (d) { if (alive) setDetail(d); })
         .catch(function (e) { if (alive) setErr(parseApiErrorMessage(e)); });
       return function () { alive = false; };
-    }, [session.id, planWrittenAt]);
+    }, [session.id]);
+
+    // Live follow: subscribe to this session's detail over the plugin WS.
+    useEffect(function () {
+      if (!SDK.buildWsUrl) return;
+      let closed = false;
+      let ws = null;
+      SDK.buildWsUrl(API + "/events", {}).then(function (url) {
+        if (closed) return;
+        try { ws = new WebSocket(url); } catch (_e) { setWsFailed(true); return; }
+        ws.onopen = function () {
+          if (closed) return;
+          setLive(true);
+          ws.send(JSON.stringify({ type: "watch", sessionId: session.id }));
+        };
+        ws.onmessage = function (ev) {
+          try {
+            const msg = JSON.parse(ev.data);
+            if (msg && msg.type === "detail" && msg.sessionId === session.id && msg.detail) {
+              setDetail(msg.detail); setErr(null);
+            }
+          } catch (_e2) { /* ignore malformed frames */ }
+        };
+        ws.onclose = function () {
+          if (closed) return;
+          setLive(false);
+          setWsFailed(true); // stream lost mid-watch: fall back to polling
+        };
+      }).catch(function () { if (!closed) setWsFailed(true); });
+      return function () {
+        closed = true;
+        try { if (ws) ws.close(); } catch (_e) {}
+      };
+    }, [session.id]);
+
+    // Poll fallback (no WS helper in the SDK, or the stream was refused/lost).
+    useEffect(function () {
+      if (SDK.buildWsUrl && !wsFailed) return;
+      const t = window.setInterval(function () {
+        authedFetchJson(API + "/sessions/" + encodeURIComponent(session.id) + "/detail")
+          .then(function (d) { setDetail(d); setErr(null); })
+          .catch(function () { /* keep last detail; next tick retries */ });
+      }, 2000);
+      return function () { window.clearInterval(t); };
+    }, [session.id, wsFailed]);
+
+    // Keep the transcript pinned to the latest message while following.
+    useEffect(function () {
+      if (detail && pinnedRef.current) scrollToBottom();
+    }, [detail]);
 
     const s = detail && detail.session;
     const projectId = (s && s.projectId) || session.projectId || "";
+    const chatItems = detail
+      ? timelineItems(detail.transcript, detail.activities, hiddenClasses)
+      : [];
     return h("div", { className: "ao-overlay", onClick: function (e) { if (e.target === e.currentTarget) props.onClose(); } },
       h("div", { className: "ao-sheet ao-sheet-detail" },
         h("div", { className: "ao-sheet-head" },
@@ -598,7 +677,9 @@
           : null,
         s ? h("div", { className: "ao-detail-transcript" },
           h("div", { className: "ao-detail-key" },
-            "Transcript" + (detail.transcriptTruncated ? " (last " + detail.transcript.length + " of " + detail.transcriptTotal + " messages)" : "")),
+            "Transcript" +
+            (detail.transcriptTruncated ? " (last " + detail.transcript.length + " of " + detail.transcriptTotal + " messages)" : "") +
+            (live ? " — live" : wsFailed ? " — polling" : "")),
           h("div", { className: "ao-class-filters" },
             Object.keys(MSG_CLASSES).map(function (id) {
               const off = !!hiddenClasses[id];
@@ -609,22 +690,27 @@
                 onClick: function () { toggleClass(id); },
               }, (off ? "\u25CB " : "\u25CF ") + MSG_CLASSES[id].label);
             })),
-          h("div", { className: "ao-chat" },
-            (function () {
-              const items = timelineItems(detail.transcript, detail.activities, hiddenClasses);
-              if (items.length === 0)
-                return h("div", { className: "ao-column-empty" }, "Nothing to show in the selected classes");
-              return items.map(function (it, i) {
-                if (it.kind === "activity")
-                  return h(ToolRow, { key: "a" + (it.item.id || i), activity: it.item });
-                const m = it.item;
-                const cls = messageClass(m);
-                return h("div", { key: "m" + (m.sequence != null ? m.sequence : i), className: "ao-chat-row ao-chat-" + cls },
-                  h("div", { className: "ao-chat-col" },
-                    h("span", { className: "ao-chat-sender" }, MSG_CLASSES[cls].label),
-                    h("div", { className: "ao-bubble" }, bubbleText(m))));
-              });
-            })())
+          h("div", { className: "ao-chat", ref: chatRef, onScroll: onChatScroll },
+            chatItems.length === 0
+              ? h("div", { className: "ao-column-empty" }, "Nothing to show in the selected classes")
+              : chatItems.map(function (it, i) {
+                  if (it.kind === "activity")
+                    return h(ToolRow, { key: "a" + (it.item.id || i), activity: it.item });
+                  const m = it.item;
+                  const cls = messageClass(m);
+                  return h("div", { key: "m" + (m.sequence != null ? m.sequence : i), className: "ao-chat-row ao-chat-" + cls },
+                    h("div", { className: "ao-chat-col" },
+                      h("span", { className: "ao-chat-sender" }, MSG_CLASSES[cls].label),
+                      h("div", { className: "ao-bubble" }, bubbleText(m))));
+                }),
+            !pinned && chatItems.length
+              ? h("button", {
+                  className: "ao-jump-latest",
+                  title: "Scroll back to the latest message",
+                  onClick: function () { setFollow(true); scrollToBottom(); },
+                }, "↓ Jump to latest")
+              : null
+          )
         ) : null,
         h("div", { className: "ao-sheet-actions" },
           h("button", { type: "button", className: "ao-btn ao-btn-ghost", onClick: props.onClose }, "Close")
@@ -721,6 +807,15 @@
     // board state). Only a genuine "daemon unreachable" counts — any other
     // failure keeps the ordinary error surface.
     const firstRunSetup = Boolean(errorKind === "daemon_unreachable" && !everConnected && !data);
+
+    // Re-render periodically so card ages (timeAgo) tick even between WS
+    // pushes — during a working turn the daemon's session row is static, so
+    // without this the "5m ago" labels would freeze mid-turn.
+    const [, setAgeTick] = useState(0);
+    useEffect(function () {
+      const t = window.setInterval(function () { setAgeTick(function (v) { return v + 1; }); }, 30000);
+      return function () { window.clearInterval(t); };
+    }, []);
 
     const refresh = useCallback(function () {
       return authedFetchJson(API + "/board")

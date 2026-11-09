@@ -543,7 +543,31 @@
   flex-direction: column;
   gap: 8px;
   padding: 2px 2px 6px;
+  /* Bounded scroll container: the sheet opens at the LATEST message and
+     follows new ones, which needs a real scroll surface of its own. */
+  max-height: min(56vh, 540px);
+  overflow-y: auto;
 }
+
+/* Sticky "jump to latest" pill: appears when the user scrolls up (follow
+   unpins), sticks to the visible bottom of the transcript while scrolled. */
+.ao-jump-latest {
+  position: sticky;
+  bottom: 10px;
+  align-self: flex-end;
+  margin: 0 6px 2px 0;
+  padding: 6px 14px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ao-text);
+  background: linear-gradient(180deg, rgba(124, 108, 255, 0.85), rgba(56, 189, 248, 0.75));
+  border: 1px solid var(--ao-border-bright);
+  border-radius: 999px;
+  cursor: pointer;
+  box-shadow: 0 4px 14px rgba(4, 6, 14, 0.55);
+}
+
+.ao-jump-latest:hover { filter: brightness(1.15); }
 
 .ao-chat-row { display: flex; }
 .ao-chat-row.ao-chat-user { justify-content: flex-end; }
