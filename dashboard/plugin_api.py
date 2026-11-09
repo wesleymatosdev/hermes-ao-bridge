@@ -32,6 +32,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from pathlib import Path
 from typing import Any, Optional
 
 from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
@@ -42,6 +43,26 @@ log = logging.getLogger("ao-bridge")
 
 PLUGIN_ID = "ao-bridge"
 DEFAULT_BASE_URL = "http://127.0.0.1:3001"
+
+
+def _manifest_version() -> str:
+    """Version from the manifest NEXT TO THIS FILE, read once at import.
+
+    The dashboard imports this module once at web-server startup and never
+    re-imports after a plugin update, while the frontend assets (and the
+    manifest itself) are served from disk per request. Reporting the
+    import-time version is what lets the frontend detect that skew — a
+    freshly served UI driving a stale in-process backend — and tell the user
+    to reload instead of misbehaving silently.
+    """
+    try:
+        raw = (Path(__file__).resolve().parent / "manifest.json").read_text(encoding="utf-8")
+        return str(json.loads(raw).get("version") or "")
+    except (OSError, ValueError):  # a broken manifest must not take the board down
+        return ""
+
+
+PLUGIN_VERSION = _manifest_version()
 
 # Board columns, in display order. AO session state maps onto these via
 # ``column_for`` below; Archive holds terminated sessions.
@@ -371,6 +392,7 @@ def board_snapshot(ao: Optional[AOClient] = None) -> dict:
         bucket.sort(key=lambda c: c.get("createdAt") or "", reverse=True)
     return {
         "ok": True,
+        "pluginVersion": PLUGIN_VERSION,
         "baseUrl": ao.base_url,
         "columns": [{"id": c, "label": COLUMN_LABELS[c]} for c in COLUMN_ORDER],
         "harnesses": COMMON_HARNESSES,
@@ -410,15 +432,34 @@ class SendBody(BaseModel):
 # Error mapping
 # ---------------------------------------------------------------------------
 
+def _error_detail(kind: str, message: str, retryable: bool,
+                  upstream_status: Optional[int] = None) -> dict:
+    """The typed error payload every failure path returns. ``pluginVersion``
+    rides along so even an error response lets the frontend run the skew check
+    (an erroring stale backend must still be identifiable)."""
+    detail: dict = {"kind": kind, "retryable": retryable, "message": message,
+                    "pluginVersion": PLUGIN_VERSION}
+    if upstream_status is not None:
+        detail["upstreamStatus"] = upstream_status
+    return detail
+
+
 def _raise_mapped(err: AOApiError) -> None:
-    """Translate an AO error into a dashboard-facing HTTP error."""
+    """Translate an AO error into a dashboard-facing HTTP error with a typed
+    JSON detail (not prose) so the UI can degrade in theme and retry."""
     if isinstance(err, AOConnectionError):
-        raise HTTPException(status_code=502, detail=str(err))
+        raise HTTPException(status_code=502, detail=_error_detail(
+            "daemon_unreachable", str(err), retryable=True))
     if err.is_gone:
-        raise HTTPException(status_code=404, detail="Session not found (gone from the AO daemon)")
+        raise HTTPException(status_code=404, detail=_error_detail(
+            "gone", "Session not found (gone from the AO daemon)",
+            retryable=False, upstream_status=err.status))
     if err.status == 409:
-        raise HTTPException(status_code=409, detail=str(err.message))
-    raise HTTPException(status_code=err.status, detail=str(err.message) or "AO daemon error")
+        raise HTTPException(status_code=409, detail=_error_detail(
+            "conflict", str(err.message), retryable=False, upstream_status=err.status))
+    raise HTTPException(status_code=err.status, detail=_error_detail(
+        "upstream_error", str(err.message) or "AO daemon error",
+        retryable=err.is_transient, upstream_status=err.status))
 
 
 # ---------------------------------------------------------------------------
@@ -433,7 +474,7 @@ def health():
         daemon = ao.healthz()
     except AOApiError as err:
         _raise_mapped(err)
-    return {"ok": True, "baseUrl": ao.base_url,
+    return {"ok": True, "pluginVersion": PLUGIN_VERSION, "baseUrl": ao.base_url,
             "daemon": {"status": daemon.get("status"), "pid": daemon.get("pid")}}
 
 
@@ -578,6 +619,7 @@ async def events(ws: WebSocket):
         return
     await ws.accept()
     last_digest: Optional[str] = None
+    upstream_down = False
     try:
         while True:
             try:
@@ -588,8 +630,28 @@ async def events(ws: WebSocket):
                 pass  # no client message — poll the daemon
             try:
                 snap = await asyncio.to_thread(board_snapshot, client())
-            except AOApiError:
-                continue  # daemon down/blip: keep the connection, keep last board
+            except AOApiError as err:
+                # Daemon down/blip: keep the connection, keep last board — but
+                # TELL the client, once per outage: a live-mode board has no
+                # HTTP poll running, so a silent `continue` would leave it
+                # showing stale data with a live badge and no banner.
+                if not upstream_down:
+                    upstream_down = True
+                    try:
+                        await ws.send_json({"type": "daemon_error", "error": {
+                            "kind": ("daemon_unreachable" if isinstance(err, AOConnectionError)
+                                     else "upstream_error"),
+                            "message": str(err), "retryable": True,
+                            "pluginVersion": PLUGIN_VERSION}})
+                    except Exception:
+                        pass  # client already gone; the outer handlers clean up
+                continue
+            if upstream_down:
+                # Daemon is back: force a board push even when the card set is
+                # unchanged across the outage, so clients clear the degraded
+                # state and restore live mode.
+                upstream_down = False
+                last_digest = None
             digest = _cards_digest(snap.get("cards") or [])
             if digest != last_digest:
                 last_digest = digest

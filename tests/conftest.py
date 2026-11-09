@@ -23,10 +23,20 @@ if str(_PLUGIN_DASHBOARD.parent) not in sys.path:
 
 def load_plugin_api():
     """Import dashboard/plugin_api.py exactly the way the dashboard server does."""
+    return load_plugin_api_from(_PLUGIN_DASHBOARD)
+
+
+def load_plugin_api_from(dashboard_dir):
+    """Import ``plugin_api.py`` from an arbitrary dashboard dir the same way
+    (spec_from_file_location), for proving import-time binding: a module loaded
+    from one dir must keep reporting that dir's manifest version even after the
+    file on disk changes — exactly the startup-import vs disk-skew mechanism."""
     import importlib.util
 
-    path = _PLUGIN_DASHBOARD / "plugin_api.py"
-    spec = importlib.util.spec_from_file_location("ao_bridge_plugin_api", path)
+    dashboard_dir = Path(dashboard_dir)
+    path = dashboard_dir / "plugin_api.py"
+    spec = importlib.util.spec_from_file_location(
+        f"ao_bridge_plugin_api_{abs(hash(str(dashboard_dir)))}", path)
     assert spec is not None and spec.loader is not None, f"spec load failed for {path}"
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)

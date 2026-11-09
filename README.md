@@ -52,6 +52,22 @@ Message sheet — send a user-authored message to a running session:
   moment the daemon state moves (server polls AO at ~1s, hash-gated diffs) —
   no manual refresh. Falls back to 5s polling automatically; a `live`/`polling`
   badge shows which mode you're in.
+- **Daemon-outage resilience (v0.2.8)**: when the AO daemon bounces, every
+  route answers a typed error payload (`kind`/`retryable`/`message`) instead of
+  prose, the WS stream tells connected clients (`daemon_error` frame) and
+  forces a board frame the moment the daemon is back, the UI keeps the
+  last-known board under an "AO daemon unreachable — retrying…" banner with a
+  `degraded` badge, and an HTTP poll runs alongside the reconnecting WS until
+  live frames resume. A first-load failure renders an in-theme error state, never
+  a blank board.
+- **Version-skew detection (v0.2.8)**: the Hermes dashboard imports
+  `plugin_api.py` once at startup and never re-imports after a plugin update,
+  while the frontend assets are served from disk per request. The backend
+  reports its import-time `pluginVersion` on every board/health payload; the UI
+  compares it with the served `manifest.json` and shows a "Plugin updated —
+  reload dashboard to apply" banner on mismatch (a payload with no version is
+  a pre-0.2.8 backend — also stale). Until the dashboard restarts, the banner
+  persists by design.
 - **Search & filter**: instant client-side match on project, session name, and
   harness, plus a status dropdown built from live `displayStatus` values. On top
   of the text search the header has a **project** dropdown (from the registered
@@ -222,7 +238,13 @@ payload shape, send, kill, conversation, error mapping), column mapping (every
 rule + precedence), and the FastAPI router (board assembly, spawn validation,
 send/kill forwarding, 502/404/409 mapping, detail route shape + transcript
 truncation + 404, WebSocket stream push-on-change / daemon-blip survival /
-auth rejection) via `fastapi.testclient`.
+auth rejection) via `fastapi.testclient`. v0.2.8 adds `tests/test_resilience.py`:
+pluginVersion exposure + import-time binding (the skew mechanism), typed error
+payloads for every route with the upstream down (including validation
+precedence), full-route recovery once the upstream returns, and the WS
+outage contract (error frame during the outage, board frame on recovery even
+with an unchanged card set). The frontend has no JS test harness; its behavior
+is verified manually against a live board (see the resilience notes above).
 
 ## Known limitations
 

@@ -294,6 +294,41 @@
   background: rgba(251, 113, 133, 0.08);
 }
 
+/* Plugin-updated skew notice: the in-process backend is older than the UI.
+   Amber, not red — nothing is broken, the dashboard just needs a reload. */
+.ao-banner-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 4px 8px;
+}
+
+.ao-banner-reload {
+  flex: 1;
+  color: var(--ao-warn, #fbbf24);
+  border: 1px solid rgba(251, 191, 36, 0.45);
+  background: rgba(251, 191, 36, 0.08);
+}
+
+/* First-load failure: no last-known board to keep, so the whole board area
+   says so instead of rendering six empty columns. */
+.ao-board-error {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  padding: 60px 20px;
+}
+
+.ao-board-error .ao-banner-error { font-size: 13px; padding: 8px 14px; }
+
+.ao-board-error-hint {
+  color: var(--ao-text-dim);
+  font-size: 12px;
+  max-width: 480px;
+  text-align: center;
+}
+
 .ao-loading {
   color: var(--ao-text-dim);
   padding: 40px 0;
@@ -390,6 +425,14 @@
   color: var(--ao-good);
   border-color: rgba(52, 211, 153, 0.45);
   background: rgba(52, 211, 153, 0.08);
+}
+
+/* The daemon is down and we're holding the last-known board: degraded, not
+   dead — retries are running. */
+.ao-header-live.is-degraded {
+  color: var(--ao-warn, #fbbf24);
+  border-color: rgba(251, 191, 36, 0.45);
+  background: rgba(251, 191, 36, 0.08);
 }
 
 .ao-search { width: 230px; }

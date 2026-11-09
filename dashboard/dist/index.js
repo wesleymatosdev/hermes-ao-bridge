@@ -20,6 +20,9 @@
 
   const API = "/api/plugins/ao-bridge";
   const POLL_MS = 5000;
+  // One message for every "daemon is down, holding the last-known board"
+  // surface: header banner, WS daemon_error frames, the first-load error state.
+  const DAEMON_DOWN_MSG = "AO daemon unreachable — retrying…";
   // Browser assets are served from the plugin's dashboard/ dir by the host
   // (dashboard-plugins static route). The SDK exposes no asset-base helper,
   // so the fixed plugin id doubles as the URL base.
@@ -45,6 +48,33 @@
       return function () { alive = false; };
     }, []);
     return map;
+  }
+
+  // Disk-served manifest version: what a fresh page load WOULD run. Compared
+  // against the backend's import-time pluginVersion (board payloads, error
+  // payloads, WS frames): the dashboard imports plugin_api.py ONCE at
+  // startup and never re-imports after a plugin update, while this file and
+  // the manifest are served from disk per request — so a mismatch means this
+  // UI is newer than the process serving it. Surface a reload banner instead
+  // of misbehaving silently.
+  let manifestVersionPromise = null;
+  function loadManifestVersion() {
+    if (!manifestVersionPromise) {
+      manifestVersionPromise = fetch(ASSET_BASE + "/manifest.json")
+        .then(function (r) { return r.ok ? r.json() : {}; })
+        .catch(function () { return {}; });
+    }
+    return manifestVersionPromise;
+  }
+
+  function useManifestVersion() {
+    const [v, setV] = useState(null);
+    useEffect(function () {
+      let alive = true;
+      loadManifestVersion().then(function (m) { if (alive) setV((m && m.version) || ""); });
+      return function () { alive = false; };
+    }, []);
+    return v;
   }
 
   function harnessIconSrc(map, harness) {
@@ -83,7 +113,15 @@
     const body = m ? m[2] : raw;
     try {
       const parsed = JSON.parse(body);
-      if (parsed && parsed.detail) return String(parsed.detail);
+      if (parsed && parsed.detail) {
+        // Typed payloads ({ kind, retryable, message }) from the v0.2.8+
+        // backend; the friendly daemon message replaces the errno prose.
+        if (typeof parsed.detail === "object") {
+          if (parsed.detail.kind === "daemon_unreachable") return "AO daemon unreachable — retrying…";
+          if (parsed.detail.message) return String(parsed.detail.message);
+        }
+        return String(parsed.detail);
+      }
     } catch (_e) { /* not JSON */ }
     return body || raw;
   }
@@ -93,7 +131,12 @@
       return resp.text().then(function (txt) {
         if (!resp.ok) {
           let detail = txt;
-          try { detail = JSON.parse(txt).detail || txt; } catch (_e) { /* raw */ }
+          // Re-envelope typed detail objects so parseApiErrorMessage can
+          // read them (a bare object stringifies as "[object Object]").
+          try {
+            const j = JSON.parse(txt);
+            if (j && j.detail !== undefined && j.detail !== null) detail = JSON.stringify({ detail: j.detail });
+          } catch (_e) { /* raw */ }
           throw new Error(resp.status + ": " + detail);
         }
         try { return JSON.parse(txt); } catch (_e) { return {}; }
@@ -499,6 +542,13 @@
     const timerRef = useRef(null);
     const wsRef = useRef(null);
     const iconMap = useHarnessIcons();
+    const manifestVersion = useManifestVersion();
+    // Version skew (plugin updated while the dashboard kept running): the
+    // backend answers with its import-time version, the manifest here is the
+    // disk one. A backend OLDER than the version field answers with no
+    // version at all — also stale (pre-0.2.8 module behind this UI).
+    const staleBackend = Boolean(manifestVersion && data
+      && manifestVersion !== data.pluginVersion);
 
     const refresh = useCallback(function () {
       return authedFetchJson(API + "/board")
@@ -511,8 +561,9 @@
     }, []);
 
     // Live updates: WebSocket /events (server polls the daemon, pushes on
-    // change); falls back to 5s polling when the SDK has no WS helper or the
-    // stream is refused.
+    // change); falls back to 5s polling when the SDK has no WS helper, the
+    // stream is refused, or the daemon is down (the WS error frame starts the
+    // poll; the next board frame stops it again).
     useEffect(function () {
       let closed = false;
       let backoff = 1000;
@@ -526,10 +577,23 @@
         pollTimer = window.setInterval(refresh, POLL_MS);
       }
 
+      function stopPoll() {
+        if (pollTimer) window.clearInterval(pollTimer);
+        pollTimer = null;
+      }
+
       function onBoard(body) {
         if (closed) return;
         setData(body); setError(null);
         setLoaded(true); setLive(true); setRefreshedAt(new Date());
+        stopPoll(); // live again — the fallback poll did its job
+      }
+
+      function onDaemonDown() {
+        if (closed) return;
+        setError(DAEMON_DOWN_MSG);
+        setLive(false);
+        startPoll(); // keep retrying over HTTP while the WS is quiet
       }
 
       function openWs() {
@@ -544,6 +608,7 @@
             try {
               const msg = JSON.parse(ev.data);
               if (msg && msg.type === "board" && msg.board) onBoard(msg.board);
+              else if (msg && msg.type === "daemon_error") onDaemonDown();
             } catch (_e) { /* ignore */ }
           };
           ws.onclose = function (e) {
@@ -553,6 +618,10 @@
               startPoll();
               return;
             }
+            // Socket lost (server restart, network blip): reconnect with
+            // backoff AND poll over HTTP meanwhile — a board that is neither
+            // live nor polling is how it freezes forever.
+            startPoll();
             reconnectTimer = window.setTimeout(openWs, Math.min(backoff, 30000));
             backoff = Math.min(backoff * 2, 30000);
           };
@@ -646,8 +715,8 @@
           data && data.baseUrl
             ? h("span", { className: "ao-header-daemon", title: data.baseUrl }, "daemon " + data.baseUrl.replace(/^https?:\/\//, ""))
             : null,
-          h("span", { className: "ao-header-live" + (live ? " is-live" : "") },
-            live ? "live" : "polling"),
+          h("span", { className: "ao-header-live" + (live ? " is-live" : (error ? " is-degraded" : "")) },
+            live ? "live" : (error ? "degraded" : "polling")),
           refreshedAt ? h("span", { className: "ao-header-updated" }, "updated " + refreshedAt.toLocaleTimeString()) : null
         ),
         h("div", { className: "ao-header-actions" },
@@ -703,9 +772,26 @@
           h("button", { className: "ao-btn ao-btn-primary", onClick: function () { setSpawnOpen(true); } }, "+ Spawn worker")
         )
       ),
+      staleBackend
+        ? h("div", { className: "ao-banner-row" },
+            h("span", { className: "ao-banner ao-banner-reload" },
+              "Plugin updated — reload dashboard to apply (backend "
+              + (data.pluginVersion ? "v" + data.pluginVersion : "predates version reporting")
+              + ", on disk v" + manifestVersion + ")"),
+            h("button", {
+              className: "ao-btn ao-btn-ghost",
+              title: "Reload the dashboard page to pick up the updated plugin",
+              onClick: function () { window.location.reload(); },
+            }, "Reload"))
+        : null,
       !loaded
         ? h("div", { className: "ao-loading" }, "Loading AO board…")
-        : h("div", { className: "ao-board" },
+        : !data
+          ? h("div", { className: "ao-board-error" },
+              h("div", { className: "ao-banner ao-banner-error" }, error || DAEMON_DOWN_MSG),
+              h("div", { className: "ao-board-error-hint" },
+                "The AO daemon has not answered yet. Retries continue automatically — the board appears here the moment the daemon does."))
+          : h("div", { className: "ao-board" },
             columns.map(function (col) {
               return h(Column, {
                 key: col.id, id: col.id, label: col.label, cards: col.cards,
