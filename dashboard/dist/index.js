@@ -140,6 +140,27 @@
     return parseApiError(err).message;
   }
 
+  // Canonical AO desktop-app deep link; each path segment percent-encoded so
+  // ids can't reshape the link. The scheme is handled by the AO app — a page
+  // can't script the launch, the browser/OS hands it off.
+  function aoDeepLink(projectId, sessionId) {
+    const sid = encodeURIComponent(sessionId || "");
+    return projectId
+      ? "ao://sessions/" + encodeURIComponent(projectId) + "/" + sid
+      : "ao://sessions/" + sid;
+  }
+
+  function ExtIcon() {
+    return h("svg", {
+      className: "ao-ext-icon", width: 12, height: 12, viewBox: "0 0 24 24",
+      fill: "none", stroke: "currentColor", strokeWidth: 2,
+      strokeLinecap: "round", strokeLinejoin: "round", "aria-hidden": true,
+    },
+      h("path", { d: "M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" }),
+      h("polyline", { points: "15 3 21 3 21 9" }),
+      h("line", { x1: 10, y1: 14, x2: 21, y2: 3 }));
+  }
+
   function authedFetchJson(url, options) {
     return (SDK.authedFetch || fetch)(url, options).then(function (resp) {
       return resp.text().then(function (txt) {
@@ -250,6 +271,12 @@
       h(PrLinks, { prs: card.prs }),
       err ? h("div", { className: "ao-card-error" }, err) : null,
       h("div", { className: "ao-card-actions" },
+        h("a", {
+          className: "ao-btn ao-btn-ghost ao-card-open",
+          href: aoDeepLink(card.projectId, card.id),
+          title: "Open in Agent Orchestrator (ao:// deep link — hands off to the AO desktop app)",
+          onClick: function (e) { e.stopPropagation(); },
+        }, "Open in AO", h(ExtIcon)),
         card.column !== "archive" && card.column !== "done"
           ? h("button", {
               className: "ao-btn ao-btn-ghost", disabled: !!busy,
@@ -432,6 +459,80 @@
     return String(m.text == null ? "" : m.text).replace(/^\s+|\s+$/g, "");
   }
 
+  // --- Tool executions in the transcript ------------------------------------
+  // Conversation activities (command | mcp_tool | reasoning) interleave with
+  // messages by their shared ``sequence`` number. Kept visually quiet: one
+  // muted line per execution, expandable. ``plan`` activities render in the
+  // Plan panel instead; system/file_change are not part of the transcript.
+  function toolStatusGlyph(a) {
+    // Wire truth (probed on the live daemon, 2026-11-09): an in-flight command
+    // or tool reports status "pending" (never observed as "running"), while a
+    // reasoning entry stays "running" even after the turn moved on — so
+    // reasoning never gets a spinner.
+    if (a.activityKind === "reasoning") return null;
+    if (a.status === "running" || a.status === "pending")
+      return h("span", { className: "ao-tool-spin", title: "running", "aria-label": "running" });
+    if (a.status === "failed"
+        || (a.activityKind === "command" && a.exitCode != null && a.exitCode !== 0))
+      return h("span", {
+        className: "ao-tool-status is-fail",
+        title: "failed" + (a.exitCode != null ? " (exit " + a.exitCode + ")" : ""),
+      }, "✗");
+    return h("span", { className: "ao-tool-status is-ok", title: "completed" }, "✓");
+  }
+
+  function ToolRow(props) {
+    const a = props.activity;
+    const [open, setOpen] = useState(false);
+    const isCmd = a.activityKind === "command";
+    const isReason = a.activityKind === "reasoning";
+    const label = isCmd
+      ? (a.summary || a.command || "command")
+      : isReason
+        ? "Reasoning"
+        : (a.toolName || a.summary || "tool");
+    return h("div", { className: "ao-tool-row ao-tool-" + a.activityKind + (open ? " is-open" : "") },
+      h("div", {
+        className: "ao-tool-head",
+        onClick: function () { setOpen(function (p) { return !p; }); },
+        title: isCmd ? (a.command || label) : (isReason ? "Show reasoning" : label),
+      },
+        h("span", { className: "ao-tool-glyph" }, isCmd ? "$" : isReason ? "…" : "⚙"),
+        h("span", { className: "ao-tool-label" }, label),
+        h("span", { className: "ao-tool-tail" },
+          toolStatusGlyph(a),
+          h("span", { className: "ao-tool-caret" }, open ? "▾" : "▸"))),
+      open ? h("div", { className: "ao-tool-body" },
+        isCmd && a.command ? h("pre", { className: "ao-tool-pre" }, a.command) : null,
+        isCmd && a.exitCode != null
+          ? h("div", { className: "ao-tool-exit" + (a.exitCode ? " is-fail" : "") },
+              "exit " + a.exitCode)
+          : null,
+        isReason && a.text ? h("div", { className: "ao-tool-reason" }, a.text) : null,
+        !isReason && a.input ? h("pre", { className: "ao-tool-pre" }, a.input) : null,
+        a.output ? h("pre", { className: "ao-tool-pre" },
+          a.output + (a.outputTruncated ? "\n…" : "")) : null,
+        isReason && a.textTruncated ? h("div", { className: "ao-tool-exit" }, "…truncated") : null
+      ) : null
+    );
+  }
+
+  // Merge transcript messages and tool activities into one sequence-ordered
+  // timeline; message-class filters apply to messages only.
+  function timelineItems(transcript, activities, hiddenClasses) {
+    const msgs = (transcript || [])
+      .filter(function (m) { return !hiddenClasses[messageClass(m)] && bubbleText(m); })
+      .map(function (m) { return { kind: "message", seq: m.sequence, item: m }; });
+    const acts = (activities || [])
+      .filter(function (a) { return a.activityKind !== "plan"; })
+      .map(function (a) { return { kind: "activity", seq: a.sequence, item: a }; });
+    return msgs.concat(acts).sort(function (x, y) {
+      const a = typeof x.seq === "number" ? x.seq : Infinity;
+      const b = typeof y.seq === "number" ? y.seq : Infinity;
+      return a - b;
+    });
+  }
+
   // --- Detail sheet (card click; read-only) --------------------------------
 
   function DetailSheet(props) {
@@ -462,9 +563,16 @@
     }, [session.id, planWrittenAt]);
 
     const s = detail && detail.session;
+    const projectId = (s && s.projectId) || session.projectId || "";
     return h("div", { className: "ao-overlay", onClick: function (e) { if (e.target === e.currentTarget) props.onClose(); } },
       h("div", { className: "ao-sheet ao-sheet-detail" },
-        h("div", { className: "ao-sheet-title" }, session.displayName),
+        h("div", { className: "ao-sheet-head" },
+          h("div", { className: "ao-sheet-title" }, session.displayName),
+          h("a", {
+            className: "ao-btn ao-btn-ghost ao-open-ao",
+            href: aoDeepLink(projectId, session.id),
+            title: "Open in Agent Orchestrator (ao:// deep link — hands off to the AO desktop app)",
+          }, "Open in Agent Orchestrator", h(ExtIcon))),
         !detail && !err ? h("div", { className: "ao-loading" }, "Loading session detail…") : null,
         err ? h("div", { className: "ao-sheet-error" }, err) : null,
         s ? h("div", { className: "ao-detail-meta" },
@@ -502,17 +610,21 @@
               }, (off ? "\u25CB " : "\u25CF ") + MSG_CLASSES[id].label);
             })),
           h("div", { className: "ao-chat" },
-            (detail.transcript || []).filter(function (m) { return !hiddenClasses[messageClass(m)] && bubbleText(m); }).length === 0
-              ? h("div", { className: "ao-column-empty" }, "No messages in the shown classes")
-              : (detail.transcript || [])
-                  .filter(function (m) { return !hiddenClasses[messageClass(m)] && bubbleText(m); })
-                  .map(function (m, i) {
-                    const cls = messageClass(m);
-                    return h("div", { key: i, className: "ao-chat-row ao-chat-" + cls },
-                      h("div", { className: "ao-chat-col" },
-                        h("span", { className: "ao-chat-sender" }, MSG_CLASSES[cls].label),
-                        h("div", { className: "ao-bubble" }, bubbleText(m))));
-                  }))
+            (function () {
+              const items = timelineItems(detail.transcript, detail.activities, hiddenClasses);
+              if (items.length === 0)
+                return h("div", { className: "ao-column-empty" }, "Nothing to show in the selected classes");
+              return items.map(function (it, i) {
+                if (it.kind === "activity")
+                  return h(ToolRow, { key: "a" + (it.item.id || i), activity: it.item });
+                const m = it.item;
+                const cls = messageClass(m);
+                return h("div", { key: "m" + (m.sequence != null ? m.sequence : i), className: "ao-chat-row ao-chat-" + cls },
+                  h("div", { className: "ao-chat-col" },
+                    h("span", { className: "ao-chat-sender" }, MSG_CLASSES[cls].label),
+                    h("div", { className: "ao-bubble" }, bubbleText(m))));
+              });
+            })())
         ) : null,
         h("div", { className: "ao-sheet-actions" },
           h("button", { type: "button", className: "ao-btn ao-btn-ghost", onClick: props.onClose }, "Close")

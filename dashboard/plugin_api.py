@@ -534,10 +534,89 @@ def kill(session_id: str):
 
 TRANSCRIPT_TAIL_LINES = 200
 
+# Tool-execution activities rendered in the transcript (wire truth probed on
+# the live daemon, 2026-11-09: entries with activityKind command | mcp_tool |
+# reasoning | plan, sharing the messages' ``sequence`` numbering space, so the
+# UI interleaves them by sequence). ``plan`` is rendered by latest_plan() above
+# and ``system``/``file_change`` are not part of the transcript contract, so
+# both are skipped here.
+TOOL_ACTIVITY_KINDS = ("command", "mcp_tool", "reasoning")
+ACTIVITY_TAIL_COUNT = 400
+TOOL_OUTPUT_MAX_CHARS = 4000
+TOOL_INPUT_MAX_CHARS = 1000
+
+
+def _bounded(text: str, limit: int) -> tuple[str, bool]:
+    return (text, False) if len(text) <= limit else (text[:limit], True)
+
+
+def activity_for(act: dict) -> Optional[dict]:
+    """Reduce one conversation activity to what the transcript row renders."""
+    kind = act.get("activityKind")
+    if kind not in TOOL_ACTIVITY_KINDS:
+        return None
+    detail = act.get("detail") or {}
+    if not isinstance(detail, dict):
+        detail = {}
+    row: dict = {
+        "id": act.get("id") or "",
+        "activityKind": kind,
+        "status": act.get("status") or "",
+        "summary": act.get("summary") or "",
+        "sequence": act.get("sequence"),
+    }
+    if kind == "command":
+        output, truncated = _bounded(str(detail.get("output") or ""), TOOL_OUTPUT_MAX_CHARS)
+        row["command"] = detail.get("command") or detail.get("rawCommand") or act.get("summary") or ""
+        row["exitCode"] = detail.get("exitCode")
+        row["output"] = output
+        row["outputTruncated"] = truncated
+    elif kind == "mcp_tool":
+        output, truncated = _bounded(str(detail.get("output") or ""), TOOL_OUTPUT_MAX_CHARS)
+        raw_input = detail.get("input")
+        if isinstance(raw_input, dict):
+            try:
+                shown_input = json.dumps(raw_input, ensure_ascii=False, sort_keys=True)
+            except (TypeError, ValueError):
+                shown_input = str(raw_input)
+        else:
+            shown_input = str(raw_input or "")
+        shown_input, input_truncated = _bounded(shown_input, TOOL_INPUT_MAX_CHARS)
+        row["toolName"] = detail.get("providerToolName") or act.get("summary") or "tool"
+        row["input"] = shown_input
+        row["inputTruncated"] = input_truncated
+        row["output"] = output
+        row["outputTruncated"] = truncated
+    else:  # reasoning
+        text, truncated = _bounded(str(detail.get("text") or ""), TOOL_OUTPUT_MAX_CHARS)
+        row["text"] = text
+        row["textTruncated"] = truncated
+    return row
+
+
+def tool_activities(conv: dict) -> dict:
+    """Tool-execution activities of a conversation snapshot, sequence-ordered,
+    bounded to the last ACTIVITY_TAIL_COUNT entries."""
+    acts = [activity_for(a) for a in (conv.get("activities") or []) if isinstance(a, dict)]
+    acts = [a for a in acts if a and a.get("sequence") is not None]
+    acts.sort(key=lambda a: a["sequence"])
+    total = len(acts)
+    return {"activities": acts[-ACTIVITY_TAIL_COUNT:], "activitiesTotal": total}
+
+
+def ao_deep_link(project_id: str, session_id: str) -> str:
+    """Canonical ao:// deep link; each path segment percent-encoded so ids
+    containing '/', '?' or '#' cannot reshape the link."""
+    sid = urllib.parse.quote(str(session_id), safe="")
+    if project_id:
+        return f"ao://sessions/{urllib.parse.quote(str(project_id), safe='')}/{sid}"
+    return f"ao://sessions/{sid}"
+
 
 @router.get("/sessions/{session_id}/detail")
 def detail(session_id: str):
-    """Read-only card detail: session metadata + bounded transcript tail."""
+    """Read-only card detail: session metadata + bounded transcript tail +
+    tool-execution activities."""
     ao = client()
     sess: dict = {}
     conv: dict = {}
@@ -552,6 +631,7 @@ def detail(session_id: str):
     tail = messages[-TRANSCRIPT_TAIL_LINES:]
     project_id = sess.get("projectId") or ""
     activity = sess.get("activity") or {}
+    tools = tool_activities(conv)
     return {
         "ok": True,
         "session": {
@@ -565,13 +645,15 @@ def detail(session_id: str):
             "createdAt": sess.get("createdAt") or "",
             "updatedAt": sess.get("updatedAt") or "",
             "activityState": activity.get("state") or "",
-            "aoLink": f"ao://sessions/{project_id}/{session_id}" if project_id
-                      else f"ao://sessions/{session_id}",
+            "aoLink": ao_deep_link(project_id, session_id),
         },
         "transcript": [
             m for m in (
                 {"role": m.get("role") or "", "text": m.get("text") or "",
                  "createdAt": m.get("createdAt") or "",
+                 # Shared sequence numbering space with activities — the UI
+                 # interleaves both by it.
+                 "sequence": m.get("sequence"),
                  # Wire truth (probed on the live daemon, 2026-11-09): origin is
                  # the reliable provenance signal — "human" only for sends typed
                  # in the AO app, "automation" for every REST /send call.
@@ -584,6 +666,8 @@ def detail(session_id: str):
         ],
         "transcriptTotal": len(messages),
         "transcriptTruncated": len(messages) > len(tail),
+        "activities": tools["activities"],
+        "activitiesTotal": tools["activitiesTotal"],
         "plan": latest_plan(conv),
     }
 

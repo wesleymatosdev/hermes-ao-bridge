@@ -116,6 +116,21 @@ retry banner (see *Daemon-outage resilience* below).
   endpoint (any orchestrator can pass `userAuthored: true`), so it never
   grants the "End user" class; Worker = assistant turns, End user =
   `origin: "human"`, everything else = Orchestrator / automation.
+- **Tool executions in the transcript** (v0.3.0): the daemon's conversation
+  activities (`command`, `mcp_tool`, `reasoning`) interleave with messages by
+  their shared `sequence` number, kept visually quiet — one muted line per
+  execution (glyph, truncated summary, exit status: green check / red ✗ /
+  spinner while in flight), click to expand the full command, input, or
+  output. Reasoning ships collapsed by default. The daemon reports an
+  in-flight command as `status: "pending"`; reasoning stays `"running"` even
+  after the turn moves on, so it never shows a spinner. Bounded like the
+  transcript (last 400 activities, outputs capped at 4000 chars). `plan`
+  activities render in the Plan panel, not the transcript.
+- **Open in Agent Orchestrator** (v0.3.0): every card and the detail-sheet
+  header carry the canonical `ao://sessions/{projectId}/{sessionId}` deep
+  link (each path segment percent-encoded), handing off to the AO desktop
+  app. Note: the installed AO app must register the `ao` URL scheme —
+  nightlies up to 0.14.11 register only `ao-app`.
 - **Spawn form**: pick a registered AO project, harness, session name, and
   initial prompt → creates the worker via the AO daemon.
 - **Message sheet**: send a user-authored message to any live session.
@@ -254,8 +269,9 @@ Coverage: AO client (health, projects, sessions, single-session unwrap, spawn
 payload shape, send, kill, conversation, error mapping), column mapping (every
 rule + precedence), and the FastAPI router (board assembly, spawn validation,
 send/kill forwarding, 502/404/409 mapping, detail route shape + transcript
-truncation + 404, WebSocket stream push-on-change / daemon-blip survival /
-auth rejection) via `fastapi.testclient`. v0.2.8 adds `tests/test_resilience.py`:
+truncation + 404, tool-activity reduction + bounding + `ao://` deep-link
+encoding, WebSocket stream push-on-change / daemon-blip survival / auth
+rejection) via `fastapi.testclient`. v0.2.8 adds `tests/test_resilience.py`:
 pluginVersion exposure + import-time binding (the skew mechanism), typed error
 payloads for every route with the upstream down (including validation
 precedence), full-route recovery once the upstream returns, and the WS
