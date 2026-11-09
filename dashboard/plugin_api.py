@@ -26,6 +26,16 @@ AO wire contract (verified against the live daemon and the AO backend source):
                                                messages land with origin=human
 - POST /api/v1/sessions/{id}/kill
 - GET  /api/v1/reports?projectId=<id>          -> {"reports": [...]} (relay, opt-in)
+- GET  /api/v1/usage/sessions                  -> {"sessions": [{sessionId,
+                                                  processedTokens, totalTokens,
+                                                  incomplete, estimatedCost}]}
+- GET  /api/v1/usage/sessions/{id}             -> {harnesses, incomplete,
+                                                  totals{processedTokens,
+                                                  estimatedCost{totalNanos}}}
+- GET  /api/v1/usage/sessions/memory           -> {"sessions": [{sessionId,
+                                                  rssBytes, cpuPercent, ...}]}
+- POST /api/v1/sessions/{id}/pin               pin (DELETE unpins)
+- PATCH /api/v1/sessions/{id}                  {"displayName"} (1..100 chars)
 """
 
 from __future__ import annotations
@@ -35,6 +45,7 @@ import calendar
 import hashlib
 import json
 import logging
+import math
 import os
 import sqlite3
 import threading
@@ -101,6 +112,97 @@ COLUMN_LABELS = {
 COMMON_HARNESSES = [
     "hermes", "claude-code", "codex", "opencode", "agy", "gemini", "goose", "cursor",
 ]
+
+# Spawn approval modes exactly as the daemon's SpawnSessionRequest enum lists
+# them. "" (absent) means harness default — AO's own composer only sends the
+# field when the user picks one.
+APPROVAL_MODES = ("", "default", "accept-edits", "auto", "bypass-permissions")
+
+# ---------------------------------------------------------------------------
+# AO-native presentation formats
+#
+# The AO desktop app's formats, ported verbatim from its frontend so the
+# bridge shows the same strings a user just saw in the app:
+# - formatTokenCount  (packages/product-ui/src/formatting.ts)
+# - formatCostNanos   (frontend/src/renderer/lib/format-cost.ts; nanos = 1e-9 USD)
+# - formatResourceBytes / CPU (packages/product-ui/src/resource-presentation.ts;
+#   the card shows "size · cpu%" only while the agent is active — an idle
+#   agent is always at 0% and printing it is noise, per AO's own comment)
+# ---------------------------------------------------------------------------
+
+NANOS_PER_DOLLAR = 1_000_000_000
+_NANOS_PER_CENT = 10_000_000
+_MB = 1024 ** 2
+_GB = 1024 ** 3
+
+
+def _format_unit(value: float) -> str:
+    text = f"{value:.1f}"
+    return text[:-2] if text.endswith(".0") else text
+
+
+def format_token_count(total_tokens) -> str:
+    tokens = max(0, int(total_tokens or 0))
+    if tokens < 1_000:
+        return f"{tokens:,} tok"
+    if tokens < 1_000_000:
+        return f"{_format_unit(tokens / 1_000)}K tok"
+    if tokens < 1_000_000_000:
+        return f"{_format_unit(tokens / 1_000_000)}M tok"
+    return f"{_format_unit(tokens / 1_000_000_000)}B tok"
+
+
+def format_cost_nanos(nanos) -> Optional[str]:
+    """"$0.45"; None = nothing to show (unknown/invalid), matching AO: an
+    estimate is never rendered as "$0.00" unless the daemon priced zero."""
+    if not isinstance(nanos, (int, float)) or isinstance(nanos, bool):
+        return None
+    if not math.isfinite(nanos) or nanos < 0:
+        return None
+    if nanos == 0:
+        return "$0.00"
+    if nanos >= _NANOS_PER_CENT:
+        return f"${nanos / NANOS_PER_DOLLAR:,.2f}"
+    digits = str(round(nanos)).zfill(9).rstrip("0")
+    return f"$0.{digits}" if digits else "$0.00"
+
+
+def format_memory_bytes(num_bytes) -> str:
+    if not isinstance(num_bytes, (int, float)) or num_bytes < 0:
+        return ""
+    if num_bytes >= _GB:
+        return f"{num_bytes / _GB:.1f} GB"
+    if num_bytes < _MB:
+        return f"{max(1, round(num_bytes / 1024))} KB"
+    if num_bytes < 10 * _MB:
+        return f"{num_bytes / _MB:.1f} MB"
+    mb = round(num_bytes / _MB)
+    if mb >= 1000:
+        return f"{mb / 1024:.1f} GB"
+    return f"{mb} MB"
+
+
+def usage_label(usage: Optional[dict]) -> str:
+    """AO's report-line semantics: cost and tokens joined by " · " (either
+    part drops out when unknown). ``usage`` is a UsageTotals-shaped dict."""
+    if not usage:
+        return ""
+    cost = format_cost_nanos((usage.get("estimatedCost") or {}).get("totalNanos"))
+    tokens = format_token_count(usage["processedTokens"]) \
+        if usage.get("processedTokens") is not None else ""
+    return " · ".join(part for part in (cost, tokens) if part)
+
+
+def resource_label(memory: Optional[dict], working: bool) -> str:
+    """'"1.4 GB · 82%" while working, just "240 MB" while idle' (AO)."""
+    if not memory:
+        return ""
+    size = format_memory_bytes(memory.get("rssBytes"))
+    if not size:
+        return ""
+    if working:
+        return f"{size} · {round(memory.get('cpuPercent') or 0)}%"
+    return size
 
 
 # ---------------------------------------------------------------------------
@@ -256,7 +358,8 @@ class AOClient:
         return resp.get("sessions") or []
 
     def spawn(self, *, display_name: str = "", prompt: str = "", project_id: str = "",
-              harness: str = "hermes", mode: str = "chat", branch: str = "") -> dict:
+              harness: str = "hermes", mode: str = "chat", branch: str = "",
+              model: str = "", effort: str = "", approval_mode: str = "") -> dict:
         body: dict = {"kind": "worker", "mode": mode, "harness": harness}
         if display_name:
             body["displayName"] = display_name
@@ -266,6 +369,15 @@ class AOClient:
             body["branch"] = branch
         if prompt:
             body["prompt"] = prompt
+        # Spawn-time model/effort/approval choices (SpawnSessionRequest wire
+        # fields); omitted when unset so harness defaults apply, exactly like
+        # AO's composer which only sends a picked value.
+        if model:
+            body["model"] = model
+        if effort:
+            body["effort"] = effort
+        if approval_mode:
+            body["approvalMode"] = approval_mode
         return self.request("POST", "/api/v1/sessions", body)
 
     def get_session(self, session_id: str) -> dict:
@@ -303,6 +415,35 @@ class AOClient:
         sid = urllib.parse.quote(session_id, safe="")
         return self.request("POST", f"/api/v1/sessions/{sid}/kill", {})
 
+    def pin(self, session_id: str, pinned: bool) -> dict:
+        # AO: POST pins, DELETE unpins — there is no PUT toggle.
+        sid = urllib.parse.quote(session_id, safe="")
+        verb = "POST" if pinned else "DELETE"
+        return self.request(verb, f"/api/v1/sessions/{sid}/pin", {})
+
+    def rename(self, session_id: str, display_name: str) -> dict:
+        # The daemon enforces the same 1..100 limit as spawn --name (wire truth,
+        # RenameSessionRequest in the live OpenAPI).
+        sid = urllib.parse.quote(session_id, safe="")
+        return self.request("PATCH", f"/api/v1/sessions/{sid}",
+                            {"displayName": display_name})
+
+    def session_usage(self, session_id: str) -> dict:
+        """SessionUsageResponse: {harnesses, incomplete, totals{processedTokens,
+        estimatedCost{totalNanos, coverage}, inputTokens, outputTokens}}."""
+        sid = urllib.parse.quote(session_id, safe="")
+        return self.request("GET", f"/api/v1/usage/sessions/{sid}")
+
+    def sessions_usage(self) -> list:
+        """Compact per-session usage rows (GET /api/v1/usage/sessions)."""
+        resp = self.request("GET", "/api/v1/usage/sessions")
+        return resp.get("sessions") or []
+
+    def sessions_memory(self) -> list:
+        """Live per-session process readings (GET /api/v1/usage/sessions/memory):
+        {sessionId, rssBytes, cpuPercent, sampledAt, processes}."""
+        resp = self.request("GET", "/api/v1/usage/sessions/memory")
+        return resp.get("sessions") or []
     def reports(self, project_id: str) -> list:
         resp = self.request("GET", "/api/v1/reports?" + urllib.parse.urlencode({"projectId": project_id}))
         return resp.get("reports") or []
@@ -387,8 +528,15 @@ def state_for(session: dict) -> str:
     return "idle"
 
 
-def card_for(session: dict, project_names: dict) -> dict:
-    """Reduce one AO session to the fields the board card renders."""
+def card_for(session: dict, project_names: dict,
+             usage_by_id: Optional[dict] = None,
+             memory_by_id: Optional[dict] = None) -> dict:
+    """Reduce one AO session to the fields the board card renders.
+
+    ``usage_by_id`` / ``memory_by_id`` come from the daemon's usage and
+    process-memory endpoints (AO board parity: its card footer carries a live
+    resource chip and a token/cost usage line).
+    """
     project_id = session.get("projectId") or ""
     prs = []
     for pr in session.get("prs") or []:
@@ -398,8 +546,19 @@ def card_for(session: dict, project_names: dict) -> dict:
                 "number": pr.get("number"),
                 "state": pr.get("state"),
                 "ci": pr.get("ci"),
+                "review": pr.get("review"),
+                "mergeability": pr.get("mergeability"),
+                "reviewComments": bool(pr.get("reviewComments")),
+                "updatedAt": pr.get("updatedAt") or "",
             })
     activity = session.get("activity") or {}
+    branch_state = session.get("branchState")
+    usage_row = usage_by_id.get(session.get("id")) if usage_by_id else None
+    label = usage_label(usage_row)
+    usage = {"label": label, "incomplete": bool(usage_row.get("incomplete"))} \
+        if usage_row and label else None
+    memory = memory_by_id.get(session.get("id")) if memory_by_id else None
+    working = (activity.get("state") or "") == "active"
     return {
         "id": session.get("id"),
         "displayName": session.get("displayName") or session.get("id"),
@@ -412,11 +571,39 @@ def card_for(session: dict, project_names: dict) -> dict:
         "status": session.get("status") or "",
         "displayStatus": session.get("displayStatus") or "",
         "branch": session.get("branch") or "",
+        "branchState": {
+            "commits": branch_state.get("commits"),
+            "unpushed": branch_state.get("unpushed"),
+        } if isinstance(branch_state, dict) else None,
+        "isPinned": bool(session.get("isPinned")),
+        "model": session.get("model") or "",
+        "mode": session.get("mode") or "",
         "activityState": activity.get("state") or "",
         "createdAt": session.get("createdAt") or "",
         "updatedAt": session.get("updatedAt") or "",
         "prs": prs,
+        "usage": usage,
+        "resource": ({"label": resource_label(memory, working),
+                      "rssBytes": memory.get("rssBytes"),
+                      "cpuPercent": memory.get("cpuPercent")} if memory else None),
     }
+
+
+# Sessions whose displayStatus says a human must act get AO's attention
+# treatment, and AO's board sorts attention cards first within a lane
+# (packages/product-ui SessionsBoardView BoardColumnView: attentionPriority,
+# then updatedAt desc). The bridge adds pinned-before-unpinned ahead of that:
+# its board doubles as the session list the AO sidebar pins to the top.
+ATTENTION_DISPLAY_STATUSES = {"Blocked", "CI failing", "Changes requested"}
+
+
+def sort_column_cards(cards: list) -> None:
+    """In-place AO board order: pinned, then attention, then most-recent
+    activity (stable two-pass sort — the second pass must not disturb the
+    updatedAt order within each priority class)."""
+    cards.sort(key=lambda c: c.get("updatedAt") or "", reverse=True)
+    cards.sort(key=lambda c: (0 if c.get("isPinned") else 1,
+                              0 if c.get("displayStatus") in ATTENTION_DISPLAY_STATUSES else 1))
 
 
 # ---------------------------------------------------------------------------
@@ -487,7 +674,8 @@ def _attach_plans(cards: list, ao: AOClient) -> None:
 
 
 def board_snapshot(ao: Optional[AOClient] = None) -> dict:
-    """One round-trip pair (projects + sessions) reduced to everything the UI draws.
+    """One round-trip set (projects + sessions + usage/memory, the latter two
+    TTL-cached) reduced to everything the UI draws.
 
     Orchestrator sessions (``kind == "orchestrator"`` — they coordinate workers,
     they don't carry worker state) are split into ``orchestrators`` so the
@@ -495,7 +683,9 @@ def board_snapshot(ao: Optional[AOClient] = None) -> dict:
     ao = ao or client()
     projects = ao.projects()
     project_names = {p.get("id"): (p.get("name") or p.get("id")) for p in projects if p.get("id")}
-    all_cards = [card_for(s, project_names) for s in ao.sessions()]
+    usage_by_id, memory_by_id = _board_usage_and_memory(ao)
+    sessions = ao.sessions()
+    all_cards = [card_for(s, project_names, usage_by_id, memory_by_id) for s in sessions]
     _attach_plans(all_cards, ao)
     cards = [c for c in all_cards if (c.get("kind") or "worker") != "orchestrator"]
     orchestrators = [c for c in all_cards if c.get("kind") == "orchestrator"]
@@ -503,7 +693,7 @@ def board_snapshot(ao: Optional[AOClient] = None) -> dict:
     for card in cards:
         by_column.setdefault(card["column"], []).append(card)
     for bucket in by_column.values():
-        bucket.sort(key=lambda c: c.get("createdAt") or "", reverse=True)
+        sort_column_cards(bucket)
     return {
         "ok": True,
         "pluginVersion": PLUGIN_VERSION,
@@ -523,6 +713,71 @@ def board_snapshot(ao: Optional[AOClient] = None) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Board usage/memory (AO card footer parity), TTL-cached
+#
+# The daemon answers GET /api/v1/usage/sessions (compact per-session token
+# totals + estimated cost) and GET /api/v1/usage/sessions/memory (live process
+# readings) in one GET each — but board snapshots are fetched per WS client
+# poll (~2s), so both ride a shared TTL cache: at most one round-trip per TTL
+# window per process, and a failed fetch keeps the last known values (usage
+# chips going blank during a daemon blip would flicker every card).
+# ---------------------------------------------------------------------------
+
+BOARD_USAGE_TTL_SECONDS = 15.0
+_board_extra_cache: dict[str, tuple[float, dict]] = {}
+_board_extra_lock = threading.Lock()
+
+
+def _compact_usage_row(row: dict) -> Optional[dict]:
+    """One GET /usage/sessions row -> UsageTotals-shaped dict for usage_label."""
+    if not isinstance(row, dict) or not row.get("sessionId"):
+        return None
+    cost = row.get("estimatedCost")
+    return {
+        "processedTokens": row.get("processedTokens"),
+        "estimatedCost": cost if isinstance(cost, dict) else None,
+        "incomplete": bool(row.get("incomplete")),
+    }
+
+
+def _fetch_board_usage_and_memory(ao: AOClient) -> dict:
+    usage: dict[str, dict] = {}
+    for row in ao.sessions_usage():
+        compact = _compact_usage_row(row)
+        if compact:
+            usage[str(row["sessionId"])] = compact
+    memory: dict[str, dict] = {}
+    for row in ao.sessions_memory():
+        if isinstance(row, dict) and row.get("sessionId"):
+            memory[str(row["sessionId"])] = {
+                "rssBytes": row.get("rssBytes") or 0,
+                "cpuPercent": row.get("cpuPercent") or 0,
+            }
+    return {"usage": usage, "memory": memory}
+
+
+def _board_usage_and_memory(ao: AOClient) -> tuple[dict, dict]:
+    now = time.monotonic()
+    with _board_extra_lock:
+        hit = _board_extra_cache.get("usage+memory")
+    if hit and hit[0] > now:
+        data = hit[1]
+    else:
+        try:
+            data = _fetch_board_usage_and_memory(ao)
+        except AOApiError:
+            # Daemon blip: keep the last known chips rather than blanking cards.
+            data = hit[1] if hit else {"usage": {}, "memory": {}}
+            with _board_extra_lock:
+                # Retry sooner than a fresh fetch would — half a TTL window.
+                _board_extra_cache["usage+memory"] = (now + BOARD_USAGE_TTL_SECONDS / 2, data)
+            return data["usage"], data["memory"]
+        with _board_extra_lock:
+            _board_extra_cache["usage+memory"] = (now + BOARD_USAGE_TTL_SECONDS, data)
+    return data["usage"], data["memory"]
+
+
+# ---------------------------------------------------------------------------
 # Request bodies
 # ---------------------------------------------------------------------------
 
@@ -533,6 +788,9 @@ class SpawnBody(BaseModel):
     prompt: str = ""
     mode: str = Field("chat")
     branch: str = ""
+    model: str = ""
+    effort: str = ""
+    approval_mode: str = Field("", alias="approvalMode")
 
     model_config = {"populate_by_name": True}
 
@@ -651,11 +909,15 @@ def spawn(body: SpawnBody):
     ao = client(timeout_s=SPAWN_TIMEOUT_S)
     if not body.project_id and not body.display_name:
         raise HTTPException(status_code=422, detail="A project or a display name is required")
+    if body.approval_mode not in APPROVAL_MODES:
+        raise HTTPException(status_code=422, detail=(
+            f"approvalMode must be one of: {', '.join(m for m in APPROVAL_MODES if m)}"))
     resp: dict = {}
     try:
         resp = ao.spawn(project_id=body.project_id, harness=body.harness,
                         display_name=body.display_name, prompt=body.prompt,
-                        mode=body.mode, branch=body.branch)
+                        mode=body.mode, branch=body.branch, model=body.model,
+                        effort=body.effort, approval_mode=body.approval_mode)
     except AOApiError as err:
         _raise_mapped(err)
     session = (resp or {}).get("session") or {}
@@ -702,6 +964,49 @@ def kill(session_id: str):
     except AOApiError as err:
         _raise_mapped(err)
     return {"ok": True, "sessionId": session_id}
+
+
+class RenameBody(BaseModel):
+    display_name: str = Field("", alias="displayName")
+
+    model_config = {"populate_by_name": True}
+
+
+@router.patch("/sessions/{session_id}")
+def rename(session_id: str, body: RenameBody):
+    """Rename a session (AO sidebar parity): PATCH /sessions/{id} with the
+    same 1..100 displayName contract the daemon enforces."""
+    name = body.display_name.strip()
+    if not name:
+        raise HTTPException(status_code=422, detail="Display name must not be empty")
+    if len(name) > 100:
+        raise HTTPException(status_code=422, detail="Display name is limited to 100 characters")
+    ao = client()
+    try:
+        ao.rename(session_id, name)
+    except AOApiError as err:
+        _raise_mapped(err)
+    return {"ok": True, "sessionId": session_id, "displayName": name}
+
+
+@router.post("/sessions/{session_id}/pin")
+def pin(session_id: str):
+    ao = client()
+    try:
+        ao.pin(session_id, pinned=True)
+    except AOApiError as err:
+        _raise_mapped(err)
+    return {"ok": True, "sessionId": session_id, "pinned": True}
+
+
+@router.delete("/sessions/{session_id}/pin")
+def unpin(session_id: str):
+    ao = client()
+    try:
+        ao.pin(session_id, pinned=False)
+    except AOApiError as err:
+        _raise_mapped(err)
+    return {"ok": True, "sessionId": session_id, "pinned": False}
 
 
 TRANSCRIPT_TAIL_LINES = 200
@@ -853,6 +1158,11 @@ def detail_payload(ao: AOClient, session_id: str) -> dict:
     project_id = sess.get("projectId") or ""
     activity = sess.get("activity") or {}
     tools = tool_activities(conv)
+    try:
+        usage_totals = ao.session_usage(session_id).get("totals") or {}
+    except AOApiError:
+        usage_totals = {}
+    branch_state = sess.get("branchState")
     payload = {
         "ok": True,
         "session": {
@@ -863,11 +1173,37 @@ def detail_payload(ao: AOClient, session_id: str) -> dict:
             "status": sess.get("status") or "",
             "displayStatus": sess.get("displayStatus") or "",
             "branch": sess.get("branch") or "",
+            "branchState": {
+                "commits": branch_state.get("commits"),
+                "unpushed": branch_state.get("unpushed"),
+            } if isinstance(branch_state, dict) else None,
+            "isPinned": bool(sess.get("isPinned")),
+            "model": sess.get("model") or "",
+            "mode": sess.get("mode") or "",
             "createdAt": sess.get("createdAt") or "",
             "updatedAt": sess.get("updatedAt") or "",
             "activityState": activity.get("state") or "",
             "aoLink": ao_deep_link(project_id, session_id),
         },
+        # AO's inspector carries a usage section (cost · tokens) — the same
+        # report-line format the cards use.
+        "usage": {"label": usage_label(usage_totals),
+                  "incomplete": bool(usage_totals.get("incomplete"))}
+        if usage_totals else None,
+        "prs": [
+            {
+                "url": pr.get("url"),
+                "number": pr.get("number"),
+                "state": pr.get("state"),
+                "ci": pr.get("ci"),
+                "review": pr.get("review"),
+                "mergeability": pr.get("mergeability"),
+                "reviewComments": bool(pr.get("reviewComments")),
+                "updatedAt": pr.get("updatedAt") or "",
+            }
+            for pr in (sess.get("prs") or [])
+            if isinstance(pr, dict) and pr.get("url")
+        ],
         "transcript": [
             m for m in (
                 {"role": m.get("role") or "", "text": m.get("text") or "",

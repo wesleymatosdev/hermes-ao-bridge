@@ -17,17 +17,23 @@ def make_session(session_id: str, *, project_id: str = "", display_name: str = "
                  status: str = "working", harness: str = "hermes",
                  terminated: bool = False, created_at: str = "2026-01-01T00:00:00Z",
                  kanban_column: str = "", provision_state: str = "ready",
-                 display_status: str = "", prs: list | None = None) -> dict:
-    return {
+                 display_status: str = "", prs: list | None = None,
+                 pinned: bool = False, model: str = "",
+                 branch_state: dict | None = None, mode: str = "chat") -> dict:
+    row = {
         "id": session_id, "kind": "worker", "harness": harness,
-        "displayName": display_name or session_id, "mode": "chat",
+        "displayName": display_name or session_id, "mode": mode,
         "activity": {"state": "active", "lastActivityAt": created_at},
         "isTerminated": terminated, "status": status,
         "displayStatus": display_status, "kanbanColumn": kanban_column,
         "provisionState": provision_state, "projectId": project_id,
         "branch": "feat/test" if project_id else "",
         "prs": prs or [], "createdAt": created_at, "updatedAt": created_at,
+        "isPinned": pinned, "model": model,
     }
+    if branch_state is not None:
+        row["branchState"] = branch_state
+    return row
 
 
 class FakeAO:
@@ -45,6 +51,11 @@ class FakeAO:
         self.steers: list[dict] = []             # steer-or-send payloads seen
         self.steer_error: Optional[tuple] = None  # (code, status, message) to answer instead
         self.killed: list[str] = []
+        self.pins: list[tuple[str, bool]] = []   # (session_id, pinned) seen
+        self.renames: list[tuple[str, str]] = []  # (session_id, name) seen
+        self.usage_rows: list[dict] = []         # GET /usage/sessions rows
+        self.memory_rows: list[dict] = []        # GET /usage/sessions/memory rows
+        self.session_usage: dict[str, dict] = {}  # GET /usage/sessions/{id} bodies
         self.healthz_ok = True
         self.spawn_status = 201
         self.send_status = 200
@@ -110,6 +121,16 @@ class _Handler(BaseHTTPRequestHandler):
             return self._json(200, {"projects": ao.project_rows})
         if path == "/api/v1/sessions":
             return self._json(200, {"sessions": list(ao.sessions_by_id.values())})
+        if path == "/api/v1/usage/sessions":
+            return self._json(200, {"sessions": ao.usage_rows})
+        if path == "/api/v1/usage/sessions/memory":
+            return self._json(200, {"sessions": ao.memory_rows})
+        if path.startswith("/api/v1/usage/sessions/"):
+            session_id = path[len("/api/v1/usage/sessions/"):]
+            body = ao.session_usage.get(session_id)
+            if body is None:
+                return self._json(404, {"error": "not found"})
+            return self._json(200, body)
         if path.endswith("/conversation"):
             session_id = self._session_id()
             if session_id not in ao.sessions_by_id:
@@ -185,6 +206,42 @@ class _Handler(BaseHTTPRequestHandler):
             if ao.kill_status != 200:
                 return self._json(ao.kill_status, {"error": "boom"})
             return self._json(200, {"ok": True})
+        if path.endswith("/pin"):
+            session = ao.sessions_by_id.get(self._session_id())
+            if session is None:
+                return self._json(404, {"error": "not found"})
+            ao.pins.append((self._session_id(), True))
+            session["isPinned"] = True
+            return self._json(200, {"session": session})
+        return self._json(404, {"error": "no such route"})
+
+    def do_DELETE(self):
+        ao = self.ao
+        if urlparse(self.path).path.endswith("/pin"):
+            session = ao.sessions_by_id.get(self._session_id())
+            if session is None:
+                return self._json(404, {"error": "not found"})
+            ao.pins.append((self._session_id(), False))
+            session["isPinned"] = False
+            return self._json(200, {"session": session})
+        return self._json(404, {"error": "no such route"})
+
+    def do_PATCH(self):
+        ao = self.ao
+        if self._parts()[:4] == ["api", "v1", "sessions", ""] or \
+                urlparse(self.path).path.startswith("/api/v1/sessions/"):
+            parts = self._parts()
+            if len(parts) == 5:
+                session = ao.sessions_by_id.get(parts[4])
+                if session is None:
+                    return self._json(404, {"error": "not found"})
+                body = self._read_body()
+                name = str(body.get("displayName") or "")
+                if not name or len(name) > 100:
+                    return self._json(400, {"error": "displayName must be 1..100 characters"})
+                ao.renames.append((parts[4], name))
+                session["displayName"] = name
+                return self._json(200, {"session": session})
         return self._json(404, {"error": "no such route"})
 
 

@@ -33,11 +33,20 @@ An **AO Bridge** tab appears in the dashboard.
 
 **The board.** Columns `Queued · Running · Review · Blocked · Done · Archive`,
 mapped from live AO session state (exact rules below). Cards show project,
-session name, harness icon, activity state, branch, age, and PR links, and working
-cards show the worker's current plan step. Spawn workers with the **+ Spawn
-worker** form (project, harness, name, initial prompt), steer and message
-sessions without leaving the board, and archive sessions (with confirmation —
-archiving terminates the session via the daemon).
+**The board.** Columns `Queued · Running · Review · Blocked · Done · Archive`,
+mapped from live AO session state (exact rules below). Cards show project,
+session name, harness icon, activity state, branch, last-activity age, PR
+links with their lifecycle state, the live process reading (`240 MB`, or
+`1.4 GB · 82%` while the agent is active) and the token/cost usage line
+(`$0.45 · 17.7M tok`) — the AO desktop app's own figures and formats for the
+same card — and working cards show the worker's current plan step. Cards carry
+the same lane order the AO board uses: pinned first, then sessions needing
+attention (displayStatus `Blocked` / `CI failing` / `Changes requested`), then
+most-recent activity. Spawn workers with the **+ Spawn worker** form (project,
+harness, name, initial prompt, interface chat/TUI, branch, model, effort,
+approval mode), steer and message sessions without leaving the board, pin and
+rename sessions from the detail sheet, and archive sessions (with
+confirmation — archiving terminates the session via the daemon).
 
 | AO session state | Board column |
 |---|---|
@@ -337,7 +346,12 @@ directly instead.
 - **Intra-turn card motion is bounded by the daemon.** A session's row is
   static for the length of a turn, so a working card's plan step refreshes on
   a 15-second cache while the turn runs; the detail sheet's watch channel is
-  the fine-grained (~1s) live surface for a single session.
+  the fine-grained (~1s) live surface for a single session. Usage and process
+  metrics ride the same kind of bound: a 15-second TTL cache over the daemon's
+  two usage endpoints, however many browsers are watching.
+- **Usage figures are the daemon's estimates.** `estimatedCost` arrives with a
+  `complete`/`partial` coverage flag from AO's pricing pipeline; the bridge
+  shows the same estimate the AO app shows, caveats included.
 - **No drag-and-drop between columns** — column membership is AO-owned state,
   and the plugin doesn't fight the daemon's lifecycle model.
 - **Spawn requires a healthy workspace registration** — AO itself rejects

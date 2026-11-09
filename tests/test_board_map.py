@@ -119,6 +119,12 @@ class FakeAOFromFixtures(FakeAO):
         # board_snapshot fetches working sessions' plans; this fixture has none
         return {}
 
+    def sessions_usage(self):
+        return []  # no usage fixtures in this test
+
+    def sessions_memory(self):
+        return []
+
 
 if __name__ == "__main__":
     unittest.main()

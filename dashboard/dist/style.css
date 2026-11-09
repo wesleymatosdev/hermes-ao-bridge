@@ -1162,3 +1162,71 @@ a.ao-btn.ao-open-ao { font-size: 12px; }
   color: var(--ao-text-dim);
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
 }
+
+/* --- Data-parity card metrics (v0.6.0) ------------------------------------- */
+/* Card footer chips carrying what the AO app shows for the same card: the
+   live process reading and the token/cost usage line, plus PR lifecycle
+   state colors on the PR chips. */
+
+.ao-card-metrics {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 6px;
+  font-size: 10.5px;
+}
+
+.ao-chip-usage,
+.ao-chip-resource {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--ao-text-dim, #8b96a5);
+  border-color: rgba(139, 150, 165, 0.3);
+}
+
+.ao-card-pin {
+  flex: none;
+  font-size: 11px;
+  line-height: 1;
+}
+
+/* PR lifecycle states (AO card colors: open=green, draft=passive,
+   merged=violet, closed=red). */
+
+.ao-chip-pr .ao-pr-state {
+  margin-left: 4px;
+  opacity: 0.75;
+  font-size: 10px;
+}
+
+.ao-pr-comments { margin-left: 3px; font-size: 10px; }
+
+.ao-chip-pr.is-open { color: #4ade80; border-color: rgba(74, 222, 128, 0.35); }
+.ao-chip-pr.is-draft { color: #8b96a5; }
+.ao-chip-pr.is-merged { color: #c4b5fd; border-color: rgba(196, 181, 253, 0.35); }
+.ao-chip-pr.is-closed { color: #f87171; border-color: rgba(248, 113, 113, 0.35); }
+
+/* --- Spawn form option grid ------------------------------------------------- */
+
+.ao-field-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px 10px;
+}
+
+.ao-field-grid .ao-field { margin: 0; }
+
+/* --- Detail sheet: PR facts -------------------------------------------------- */
+
+.ao-detail-prs { margin-top: 10px; }
+
+.ao-detail-pr {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.ao-detail-pr-facts {
+  font-size: 11px;
+  color: var(--ao-text-dim, #8b96a5);
+}

@@ -303,18 +303,68 @@
       props.harness);
   }
 
+  // PR chips with the lifecycle state the daemon reports (open/draft/merged/
+  // closed + unresolved-comment flag), matching the AO card's state-grouped
+  // PR presentation as far as the session row's facts reach.
+  const PR_STATE_CLASS = {
+    open: "is-open", draft: "is-draft", merged: "is-merged", closed: "is-closed",
+  };
+
   function PrLinks(props) {
     const prs = props.prs || [];
     if (!prs.length) return null;
     return h("div", { className: "ao-card-prs" },
       prs.slice(0, 3).map(function (pr, i) {
+        const state = (pr.state || "").toLowerCase();
         return h("a", {
-          key: i, className: "ao-chip ao-chip-pr", href: pr.url,
+          key: i,
+          className: "ao-chip ao-chip-pr" + (PR_STATE_CLASS[state] ? " " + PR_STATE_CLASS[state] : ""),
+          href: pr.url,
           target: "_blank", rel: "noreferrer",
+          title: prStateTitle(pr),
           onClick: function (e) { e.stopPropagation(); },
-        }, "PR" + (pr.number ? " #" + pr.number : ""));
+        },
+          "#" + (pr.number != null ? pr.number : "?"),
+          state ? h("span", { className: "ao-pr-state" }, state) : null,
+          pr.reviewComments ? h("span", { className: "ao-pr-comments", title: "unresolved review comments" }, "💬") : null);
       })
     );
+  }
+
+  function prStateTitle(pr) {
+    const parts = [];
+    if (pr.state) parts.push(pr.state);
+    if (pr.ci && pr.ci !== "unknown") parts.push("CI " + pr.ci);
+    if (pr.review) parts.push(String(pr.review).replace(/_/g, " "));
+    if (pr.mergeability && pr.mergeability !== "unknown") parts.push(pr.mergeability);
+    return "PR" + (pr.number != null ? " #" + pr.number : "") +
+      (parts.length ? " — " + parts.join(" · ") : "");
+  }
+
+  function branchStateTitle(bs) {
+    if (!bs) return "";
+    const parts = [];
+    if (bs.commits != null) parts.push(bs.commits + (bs.commits === 1 ? " commit" : " commits"));
+    if (bs.unpushed != null) parts.push(bs.unpushed + " unpushed");
+    return parts.join(" · ");
+  }
+
+  // Card footer metrics, AO formats (server-precomputed): live process usage
+  // "240 MB" / "1.4 GB · 82%" while active, and the token/cost line from the
+  // daemon's usage endpoint — the figures the AO app shows for the same card.
+  function UsageChip(props) {
+    const usage = props.card.usage;
+    if (!usage || !usage.label) return null;
+    return h("span", {
+      className: "ao-chip ao-chip-usage",
+      title: "Estimated usage" + (usage.incomplete ? " (incomplete — usage still settling)" : ""),
+    }, usage.label);
+  }
+
+  function ResourceChip(props) {
+    const res = props.card.resource;
+    if (!res || !res.label) return null;
+    return h("span", { className: "ao-chip ao-chip-resource", title: "Live process usage" }, res.label);
   }
 
   // Live plan (wire truth: last plan activity in the conversation snapshot is
@@ -336,6 +386,23 @@
     },
       h("span", { className: "ao-card-plan-step" }, cur ? cur.text : ""),
       h("span", { className: "ao-card-plan-count" }, done + "/" + steps.length + " steps"));
+  }
+
+  // Lane order (AO board semantics): pinned, then attention — displayStatus
+  // Blocked / CI failing / Changes requested is AO's needs-attention set —
+  // then most-recent activity. Mirrors the backend's sort_column_cards so the
+  // order also holds against an older backend that ships unsorted cards.
+  const ATTENTION_DISPLAY_STATUSES = {
+    "Blocked": true, "CI failing": true, "Changes requested": true,
+  };
+
+  function cardLaneOrder(a, b) {
+    const pa = a.isPinned ? 0 : 1, pb = b.isPinned ? 0 : 1;
+    if (pa !== pb) return pa - pb;
+    const aa = ATTENTION_DISPLAY_STATUSES[a.displayStatus] ? 0 : 1;
+    const ab = ATTENTION_DISPLAY_STATUSES[b.displayStatus] ? 0 : 1;
+    if (aa !== ab) return aa - ab;
+    return (b.updatedAt || "").localeCompare(a.updatedAt || "");
   }
 
   function Card(props) {
@@ -362,7 +429,12 @@
     },
       h("div", { className: "ao-card-top" },
         h("span", { className: "ao-card-project", title: card.projectId || "standalone" }, card.project),
-        h("span", { className: "ao-card-age", title: card.createdAt }, timeAgo(card.createdAt))
+        card.isPinned ? h("span", { className: "ao-card-pin", title: "Pinned" }, "📌") : null,
+        // The card's clock is last activity (AO semantics), not creation age.
+        h("span", {
+          className: "ao-card-age",
+          title: card.updatedAt ? "Updated " + card.updatedAt : "",
+        }, timeAgo(card.updatedAt))
       ),
       h("div", { className: "ao-card-name", title: card.displayName }, card.displayName),
       card.plan && card.status === "working" ? h(PlanLine, { plan: card.plan }) : null,
@@ -372,6 +444,11 @@
         card.branch ? h("span", { className: "ao-chip ao-chip-branch", title: card.branch }, card.branch) : null
       ),
       h(PrLinks, { prs: card.prs }),
+      (card.resource && card.resource.label) || (card.usage && card.usage.label)
+        ? h("div", { className: "ao-card-metrics" },
+            h(ResourceChip, { card: card }),
+            h(UsageChip, { card: card }))
+        : null,
       err ? h("div", { className: "ao-card-error" }, err) : null,
       h("div", { className: "ao-card-actions" },
         props.openLinks
@@ -484,6 +561,11 @@
     const [harness, setHarness] = useState("hermes");
     const [name, setName] = useState("");
     const [prompt, setPrompt] = useState("");
+    const [mode, setMode] = useState("chat");
+    const [branch, setBranch] = useState("");
+    const [model, setModel] = useState("");
+    const [effort, setEffort] = useState("");
+    const [approvalMode, setApprovalMode] = useState("");
     const [busy, setBusy] = useState(false);
     const [err, setErr] = useState(null);
 
@@ -494,7 +576,10 @@
       authedFetchJson(API + "/spawn", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ projectId: projectId, harness: harness, displayName: name, prompt: prompt }),
+        body: JSON.stringify({
+          projectId: projectId, harness: harness, displayName: name, prompt: prompt,
+          mode: mode, branch: branch, model: model, effort: effort, approvalMode: approvalMode,
+        }),
       })
         .then(function (resp) {
           props.onClose();
@@ -542,6 +627,50 @@
           h("textarea", { className: "ao-input ao-textarea", rows: 6, value: prompt,
                           placeholder: "Initial task for the agent (optional)",
                           onChange: function (e) { setPrompt(e.target.value); } })
+        ),
+        h("div", { className: "ao-field-grid" },
+          h("label", { className: "ao-field" },
+            h("span", { className: "ao-field-label" }, "Interface"),
+            h("select", { className: "ao-input", value: mode, title: "chat or TUI",
+                          onChange: function (e) { setMode(e.target.value); } },
+              ["chat", "tui"].map(function (m) {
+                return h("option", { key: m, value: m }, m);
+              }))
+          ),
+          h("label", { className: "ao-field" },
+            h("span", { className: "ao-field-label" }, "Branch"),
+            h("input", { className: "ao-input", value: branch,
+                         placeholder: "default",
+                         title: "Branch to start the worktree from (optional)",
+                         onChange: function (e) { setBranch(e.target.value); } })
+          ),
+          h("label", { className: "ao-field" },
+            h("span", { className: "ao-field-label" }, "Model"),
+            h("input", { className: "ao-input", value: model,
+                         placeholder: "harness default",
+                         title: "Model id the harness should run (optional)",
+                         onChange: function (e) { setModel(e.target.value); } })
+          ),
+          h("label", { className: "ao-field" },
+            h("span", { className: "ao-field-label" }, "Effort"),
+            h("input", { className: "ao-input", value: effort,
+                         placeholder: "harness default",
+                         title: "Reasoning effort the model accepts, e.g. low/medium/high (optional)",
+                         onChange: function (e) { setEffort(e.target.value); } })
+          ),
+          h("label", { className: "ao-field" },
+            h("span", { className: "ao-field-label" }, "Approvals"),
+            h("select", { className: "ao-input", value: approvalMode,
+                          title: "How the agent handles permission prompts",
+                          onChange: function (e) { setApprovalMode(e.target.value); } },
+              [["", "harness default"],
+               ["default", "default"],
+               ["accept-edits", "accept-edits"],
+               ["auto", "auto"],
+               ["bypass-permissions", "bypass-permissions"]].map(function (m) {
+                return h("option", { key: m[0], value: m[0] }, m[1]);
+              }))
+          )
         ),
         err ? h("div", { className: "ao-sheet-error" }, err) : null,
         h("div", { className: "ao-sheet-actions" },
@@ -831,9 +960,42 @@
     const [pinned, setPinned] = useState(true);
     const [wsFailed, setWsFailed] = useState(false);
     const [live, setLive] = useState(false);
+    const [busy, setBusy] = useState(null);
     const chatRef = useRef(null);
     const pinnedRef = useRef(true);
     const session = props.session;
+
+    function reload() {
+      authedFetchJson(API + "/sessions/" + encodeURIComponent(session.id) + "/detail")
+        .then(function (d) { setDetail(d); setErr(null); })
+        .catch(function (e) { setErr(parseApiErrorMessage(e)); });
+    }
+
+    function pin(next) {
+      setBusy("pin");
+      authedFetchJson(API + "/sessions/" + encodeURIComponent(session.id) + "/pin", {
+        method: next ? "POST" : "DELETE",
+        headers: { "Content-Type": "application/json" }, body: "{}",
+      }).then(reload).catch(function (e) { setErr(parseApiErrorMessage(e)); })
+        .finally(function () { setBusy(null); });
+    }
+
+    function rename() {
+      const next = window.prompt("Rename session", session.displayName);
+      if (next == null) return;
+      const name = next.trim();
+      if (!name || name === session.displayName) return;
+      setBusy("rename");
+      authedFetchJson(API + "/sessions/" + encodeURIComponent(session.id), {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ displayName: name }),
+      }).then(function () {
+        session.displayName = name; // the board card catches up on its next sync
+        reload();
+      }).catch(function (e) { setErr(parseApiErrorMessage(e)); })
+        .finally(function () { setBusy(null); });
+    }
 
     function setFollow(v) {
       pinnedRef.current = v;
@@ -941,9 +1103,31 @@
           h("div", { className: "ao-detail-row" }, h("span", { className: "ao-detail-key" }, "Status"), h("span", null, s.displayStatus || s.status || "—")),
           h("div", { className: "ao-detail-row" }, h("span", { className: "ao-detail-key" }, "Project"), h("span", null, s.projectId || "standalone")),
           h("div", { className: "ao-detail-row" }, h("span", { className: "ao-detail-key" }, "Harness"), h("span", null, s.harness || "—")),
-          h("div", { className: "ao-detail-row" }, h("span", { className: "ao-detail-key" }, "Branch"), h("span", { className: "ao-chip-branch" }, s.branch || "—")),
-          h("div", { className: "ao-detail-row" }, h("span", { className: "ao-detail-key" }, "Created"), h("span", null, timeAgo(s.createdAt) + (s.createdAt ? " (" + s.createdAt + ")" : "")))
+          s.model ? h("div", { className: "ao-detail-row" }, h("span", { className: "ao-detail-key" }, "Model"), h("span", null, s.model)) : null,
+          s.mode ? h("div", { className: "ao-detail-row" }, h("span", { className: "ao-detail-key" }, "Mode"), h("span", null, s.mode)) : null,
+          h("div", { className: "ao-detail-row" },
+            h("span", { className: "ao-detail-key" }, "Branch"),
+            h("span", { className: "ao-chip-branch", title: branchStateTitle(s.branchState) }, s.branch || "—")),
+          detail && detail.usage && detail.usage.label
+            ? h("div", { className: "ao-detail-row" },
+                h("span", { className: "ao-detail-key" }, "Usage"),
+                h("span", { title: detail.usage.incomplete ? "usage still settling" : "estimated from provider pricing" },
+                  detail.usage.label))
+            : null,
+          h("div", { className: "ao-detail-row" }, h("span", { className: "ao-detail-key" }, "Created"), h("span", null, timeAgo(s.createdAt) + (s.createdAt ? " (" + s.createdAt + ")" : ""))),
+          s.updatedAt ? h("div", { className: "ao-detail-row" }, h("span", { className: "ao-detail-key" }, "Updated"), h("span", null, timeAgo(s.updatedAt) + " (" + s.updatedAt + ")")) : null
         ) : null,
+        detail && detail.prs && detail.prs.length
+          ? h("div", { className: "ao-detail-prs" },
+              h("div", { className: "ao-detail-key" }, "Pull requests"),
+              detail.prs.map(function (pr, i) {
+                return h("div", { key: i, className: "ao-detail-pr" },
+                  h("a", { href: pr.url, target: "_blank", rel: "noreferrer",
+                           className: "ao-chip ao-chip-pr" + (PR_STATE_CLASS[(pr.state || "").toLowerCase()] ? " " + PR_STATE_CLASS[(pr.state || "").toLowerCase()] : "") },
+                    "#" + (pr.number != null ? pr.number : "?")),
+                  h("span", { className: "ao-detail-pr-facts" }, prStateTitle(pr)));
+              }))
+          : null,
         detail && detail.plan && detail.plan.steps && detail.plan.steps.length
           ? h("div", { className: "ao-detail-plan" },
               h("div", { className: "ao-detail-key" }, "Plan" +
@@ -1014,6 +1198,16 @@
         ) : null,
         detail ? h(EnrichedSection, { enriched: detail.hermesEnriched }) : null,
         h("div", { className: "ao-sheet-actions" },
+          h("button", {
+            type: "button", className: "ao-btn ao-btn-ghost", disabled: busy === "pin",
+            title: s && s.isPinned ? "Unpin — pinned sessions sort first on the board" : "Pin — sort this session first on the board",
+            onClick: function () { pin(!s || !s.isPinned); },
+          }, busy === "pin" ? "…" : (s && s.isPinned ? "Unpin" : "Pin")),
+          h("button", {
+            type: "button", className: "ao-btn ao-btn-ghost", disabled: busy === "rename",
+            title: "Rename this session (the daemon limits names to 100 characters)",
+            onClick: rename,
+          }, busy === "rename" ? "…" : "Rename"),
           h("button", { type: "button", className: "ao-btn ao-btn-ghost", onClick: props.onClose }, "Close")
         )
       )
@@ -1305,7 +1499,7 @@
       });
       return (data.columns || []).map(function (col) {
         const b = buckets[col.id] || [];
-        b.sort(function (a, b2) { return (b2.createdAt || "").localeCompare(a.createdAt || ""); });
+        b.sort(cardLaneOrder);
         return { id: col.id, label: col.label, cards: b };
       });
     }, [data, matchesFilters]);
