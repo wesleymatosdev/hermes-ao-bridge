@@ -6,6 +6,14 @@
    dark-aurora, liquid-glass (the four brand-study pages) and air (derived
    from air.inc's live CSS — see the block comment there).
    Adding a theme = one token block here + an entry in THEMES (dist/index.js).
+   TOKEN RULE: token values must be plain srgb colors (hex/rgba/gradients of
+   them) — never oklch() or color-mix(). An unsupported function inside a
+   custom property makes every var() that consumes it "invalid at
+   computed-value time", which blanked the whole waves theme on engines
+   without those functions (v0.8.0 bug: cards vanished under any
+   non-default theme; v0.8.1 precomputed the oklch values — Chrome-exact —
+   to plain srgb). Component RULES may still use color-mix for washes: a
+   failed mix there degrades one cosmetic declaration, never a token.
    Hardcoded colors are allowed only inside token declarations and the
    theme-picker swatches (which must show a theme's colors from inside a
    DIFFERENT theme, so they cannot read that theme's variables). */
@@ -70,12 +78,12 @@
 
   /* --- transcript bubbles ----------------------------------------------------- */
   --ao-bubble-user-bg: linear-gradient(135deg, rgba(124, 108, 255, 0.35), rgba(56, 189, 248, 0.26));
-  --ao-bubble-user-border: color-mix(in srgb, var(--ao-accent) 50%, transparent);
+  --ao-bubble-user-border: rgba(124, 108, 255, 0.5);
   --ao-bubble-user-fg: var(--ao-text);
-  --ao-bubble-worker-bg: color-mix(in srgb, var(--ao-good) 9%, transparent);
-  --ao-bubble-worker-border: color-mix(in srgb, var(--ao-good) 30%, transparent);
-  --ao-bubble-orch-bg: color-mix(in srgb, var(--ao-warn) 6%, transparent);
-  --ao-bubble-orch-border: color-mix(in srgb, var(--ao-warn) 45%, transparent);
+  --ao-bubble-worker-bg: rgba(52, 211, 153, 0.09);
+  --ao-bubble-worker-border: rgba(52, 211, 153, 0.3);
+  --ao-bubble-orch-bg: rgba(251, 191, 36, 0.06);
+  --ao-bubble-orch-border: rgba(251, 191, 36, 0.45);
 
   color: var(--ao-text);
   min-height: 100%;
@@ -87,54 +95,57 @@
 .ao-theme-nebula { }
 
 /* --- waves-discovery ---------------------------------------------------------
-   Dark neutral OKLCH surfaces, single rose accent, teal for anything live,
-   yellow for review, dense and flat (no blur, no glow). */
+   Dark neutral surfaces, single rose accent, teal for anything live, yellow
+   for review, dense and flat (no blur, no glow). All token values are plain
+   srgb — Chrome-converted from the study's OKLCH (see the token rule in the
+   file header); oklch()/color-mix() inside a custom property poisons every
+   surface that var() feeds on engines without those functions. */
 .ao-theme-waves {
-  --ao-page-bg: oklch(0.145 0 0);
-  --ao-bg-panel: oklch(0.18 0 0);
-  --ao-bg-card: oklch(0.205 0 0);
-  --ao-bg-sheet: oklch(0.205 0 0);
+  --ao-page-bg: #0a0a0a;
+  --ao-bg-panel: #121212;
+  --ao-bg-card: #171717;
+  --ao-bg-sheet: #171717;
   --ao-bg-input: transparent;
-  --ao-bg-inset: oklch(0.178 0 0);
-  --ao-bg-chip: color-mix(in oklab, var(--ao-accent) 8%, transparent);
-  --ao-bg-count: oklch(0.269 0 0);
-  --ao-hover: oklch(0.269 0 0);
-  --ao-overlay-bg: oklch(0 0 0 / 40%);
+  --ao-bg-inset: #121212;
+  --ao-bg-chip: rgba(255, 86, 128, 0.08);
+  --ao-bg-count: #262626;
+  --ao-hover: #262626;
+  --ao-overlay-bg: rgba(0, 0, 0, 0.4);
   --ao-blur-panel: none;
   --ao-blur-sheet: none;
   --ao-overlay-blur: none;
 
-  --ao-text: oklch(0.985 0 0);
-  --ao-text-dim: oklch(0.708 0 0);
+  --ao-text: #fafafa;
+  --ao-text-dim: #a1a1a1;
 
-  --ao-accent: oklch(0.7 0.21 10);
-  --ao-accent-2: oklch(0.6 0.104 184.7);
-  --ao-accent-3: oklch(0.7 0.21 10);
-  --ao-accent-contrast: oklch(0.985 0 0);
-  --ao-good: oklch(0.6 0.104 184.7);
-  --ao-warn: oklch(0.837 0.164 84.43);
-  --ao-bad: oklch(0.704 0.191 22.216);
-  --ao-c-queued: oklch(0.708 0 0);
-  --ao-c-running: oklch(0.6 0.104 184.7);
-  --ao-c-review: oklch(0.837 0.164 84.43);
-  --ao-c-blocked: oklch(0.704 0.191 22.216);
-  --ao-c-done: oklch(0.72 0.12 160);
-  --ao-c-archived: oklch(0.708 0 0);
-  --ao-header-fill: oklch(0.7 0.21 10);
-  --ao-primary-fill: oklch(0.61 0.225 10);
+  --ao-accent: #ff5680;
+  --ao-accent-2: #0c9488;
+  --ao-accent-3: #ff5680;
+  --ao-accent-contrast: #fafafa;
+  --ao-good: #0c9488;
+  --ao-warn: #fbbf25;
+  --ao-bad: #ff6467;
+  --ao-c-queued: #a1a1a1;
+  --ao-c-running: #0c9488;
+  --ao-c-review: #fbbf25;
+  --ao-c-blocked: #ff6467;
+  --ao-c-done: #56bc8a;
+  --ao-c-archived: #a1a1a1;
+  --ao-header-fill: #ff5680;
+  --ao-primary-fill: #e92664;
 
-  --ao-border: oklch(1 0 0 / 10%);
-  --ao-border-bright: color-mix(in oklab, var(--ao-accent) 45%, var(--ao-border));
+  --ao-border: rgba(255, 255, 255, 0.1);
+  --ao-border-bright: rgba(255, 104, 142, 0.5);
 
   --ao-r-sm: 8px;
   --ao-r-md: 8px;
   --ao-r-lg: 10px;
   --ao-r-xl: 14px;
-  --ao-sheet-shadow: 0 24px 60px oklch(0 0 0 / 45%);
+  --ao-sheet-shadow: 0 24px 60px rgba(0, 0, 0, 0.45);
 
-  --ao-bubble-user-bg: color-mix(in oklab, var(--ao-accent) 18%, var(--ao-bg-card));
-  --ao-bubble-user-border: color-mix(in oklab, var(--ao-accent) 30%, transparent);
-  --ao-bubble-worker-bg: oklch(0.269 0 0);
+  --ao-bubble-user-bg: #3d2428;
+  --ao-bubble-user-border: rgba(255, 86, 128, 0.3);
+  --ao-bubble-worker-bg: #262626;
   --ao-bubble-worker-border: transparent;
   --ao-bubble-orch-bg: transparent;
   --ao-bubble-orch-border: var(--ao-border);
@@ -151,9 +162,9 @@
   --ao-bg-sheet: #faf8f3;
   --ao-bg-input: #ffffff;
   --ao-bg-inset: #f2eee5;
-  --ao-bg-chip: color-mix(in srgb, var(--ao-accent) 9%, transparent);
-  --ao-bg-count: color-mix(in srgb, var(--ao-accent) 13%, transparent);
-  --ao-hover: color-mix(in srgb, var(--ao-accent) 6%, transparent);
+  --ao-bg-chip: rgba(178, 58, 29, 0.09);
+  --ao-bg-count: rgba(178, 58, 29, 0.13);
+  --ao-hover: rgba(178, 58, 29, 0.06);
   --ao-overlay-bg: rgba(26, 22, 17, 0.38);
   --ao-blur-panel: none;
   --ao-blur-sheet: none;
@@ -1080,7 +1091,7 @@
 }
 
 .ao-theme-dot-nebula { background: linear-gradient(135deg, #7c6cff, #38bdf8); }
-.ao-theme-dot-waves { background: oklch(0.7 0.21 10); }
+.ao-theme-dot-waves { background: #ff5680; }
 .ao-theme-dot-editorial { background: #faf8f3; border-color: #cfc8b6; }
 .ao-theme-dot-aurora { background: linear-gradient(120deg, #2dd4bf, #818cf8 52%, #e879f9); }
 .ao-theme-dot-glass { background: linear-gradient(145deg, #7cc4ff, #8b5cf6); }

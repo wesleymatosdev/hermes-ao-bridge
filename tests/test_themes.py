@@ -136,6 +136,22 @@ class ThemeCssContractTest(unittest.TestCase):
     def test_root_div_carries_the_theme_class(self):
         self.assertIn('className: "ao-bridge ao-theme-" + normalizeTheme(theme)', INDEX_JS)
 
+    def test_token_values_are_engine_proof(self):
+        # v0.8.0 regression: waves shipped oklch()/color-mix() inside custom
+        # properties. An engine without those functions treats the value as
+        # invalid at var-substitution time, so every surface consuming the
+        # token went unset — transparent cards, inherited text: the theme
+        # rendered "no cards" while nebula (plain hex/rgba) kept working.
+        # Tokens must stay plain srgb; component rules may use color-mix
+        # (a failed mix there costs one cosmetic declaration, never a token).
+        for m in re.finditer(r"\.(ao-bridge|ao-theme-[a-z]+)\s*\{([^}]*)\}", STYLE_CSS):
+            block, body = m.group(1), m.group(2)
+            for fn in ("oklch(", "color-mix(", "oklab", "lab("):
+                self.assertNotIn(fn, body,
+                                 f"{block} uses {fn!r} in a token value — "
+                                 "precompute it to plain srgb (see the TOKEN RULE "
+                                 "in style.css)")
+
 
 if __name__ == "__main__":
     unittest.main()
