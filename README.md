@@ -482,6 +482,58 @@ parsing, the relay (event extraction, batching, dedup, delivery), and the
 Hermes enrichment (join resolution against a fixture `state.db`, merge +
 bounding contracts, degradation without a store).
 
+### Dev notes — the ship gate (`scripts/ship_check.sh`)
+
+`scripts/ship_check.sh` is the definition of **shippable**. It runs both
+lanes and exits nonzero on any failure:
+
+```bash
+scripts/ship_check.sh
+```
+
+**Lane 1 — unit suite.** The command above (python `unittest` over the fake
+daemon, including the node-run JS-block contracts).
+
+**Lane 2 — browser E2E (`tests/e2e/`).** The unit suite tests pieces; four
+shipped bugs (v0.8.0–v0.8.3) stayed green through all of it because nothing
+asserted *rendered behavior*. This lane renders the REAL frontend
+(`dashboard/dist/index.js` + `dist/style.css`) in a real headless Chrome
+(CDP over python `websockets` — no npm, no network) against the REAL
+`plugin_api.py` router pointed at the fixture daemon
+(`tests/fake_ao_server.py`), and asserts what a user sees — one contract per
+shipped bug:
+
+| # | Contract (test class) | Catches |
+|---|---|---|
+| 1 | Every picker theme paints cards — computed card surface present, text contrast sane — **including with the fragile color functions made unparseable** (`style.css?break=1`, the exact v0.8.0 reproduction) | v0.8.1 oklch/color-mix token poisoning |
+| 2 | Switching **Active only** off changes column card counts | v0.8.2 dropped-toggle no-op |
+| 3 | Exited sessions never wear the **Archived** chip; the Archive strip holds only daemon-archived sessions | v0.8.2/v0.8.3 state honesty |
+| 4 | Orchestrators render on the board (strip visible with Active only on) | v0.8.3 vanishing orchestrators |
+| 5 | Every theme swatch applies its theme and persists across reload | picker/persistence regressions |
+
+Requirements and knobs:
+
+- A local Chrome/Chromium (discovered automatically; `CHROME_BIN` overrides).
+  Without one the lane SKIPS — and the gate treats a skipped E2E lane as RED:
+  a gate that cannot look at the board is not green.
+- `AO_BRIDGE_PYTHON` — interpreter with `fastapi`, `websockets`, `uvicorn`
+  (defaults to the Hermes venv, else `python3`).
+- `AO_BRIDGE_E2E_ARTIFACT_DIR` — where proof screenshots go (default: system
+  temp). Each contract writes a screenshot on every run.
+- `AO_BRIDGE_E2E_PLUGIN_ROOT` — plugin tree under test. Defaults to this
+  checkout; point it at another commit's worktree to prove a contract RED
+  against pre-fix code (the v0.8.x RED/GREEN receipts were produced exactly
+  this way).
+
+**RED/GREEN proof receipts (2026-11-09):** run against pre-fix worktrees —
+v0.8.0 RED on contracts 1–4, v0.8.1 RED on 2–4, v0.8.2 RED on 4, main GREEN
+on all. Nothing writes outside loopback + throwaway temp dirs: the real AO
+daemon and the real Hermes home are never touched.
+
+The E2E fixture never talks to a live AO daemon, and the harness server binds
+loopback only. React 18.3.1 UMD builds for the host page are vendored and
+SHA-256-pinned in `tests/e2e/vendor/` (see its README).
+
 #### Parity audit — AO's ACP view vs the Hermes store (2026-11-09)
 
 What AO captured vs what Hermes stored for the same worker session, measured
