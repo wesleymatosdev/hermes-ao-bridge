@@ -39,7 +39,7 @@ config_schema:
   relay_api_key:
     type: str
     default: ""
-    description: Your gateway's API_SERVER_KEY, pasted here — authenticates the api_server delivery route (README: Enable delivery)
+    description: Your gateway's API_SERVER_KEY, pasted here — authenticates the api_server delivery route (see the README's "Enable delivery" section)
   relay_peer:
     type: str
     default: ""
