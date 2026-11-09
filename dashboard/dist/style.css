@@ -418,6 +418,21 @@
 
 .ao-orch-open { margin-left: auto; flex: none; }
 
+/* --- archive strip -------------------------------------------------------- */
+/* Same strip anatomy as the orchestrators; tint marks the difference (this is
+   history, not coordination) and the row carries the Restore action. */
+
+.ao-arch-title { color: #8b93c8; }
+
+.ao-arch-error {
+  color: var(--ao-bad);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ao-arch-restore { flex: none; }
+
 /* --- buttons ------------------------------------------------------------- */
 
 .ao-btn {
@@ -757,6 +772,50 @@
   font-size: 12px;
   color: var(--ao-good);
 }
+
+/* Composer image attachments (paste / drop / picker): thumbnails between the
+   input and the actions row, each removable before send. */
+
+.ao-composer-images {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.ao-composer-image {
+  position: relative;
+  width: 56px;
+  height: 56px;
+  border-radius: 8px;
+  overflow: hidden;
+  border: 1px solid var(--ao-border);
+}
+
+.ao-composer-image img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.ao-composer-image-x {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  width: 16px;
+  height: 16px;
+  line-height: 14px;
+  padding: 0;
+  font-size: 11px;
+  border-radius: 50%;
+  border: 1px solid var(--ao-border);
+  background: rgba(7, 9, 18, 0.85);
+  color: var(--ao-text);
+  cursor: pointer;
+}
+.ao-composer-image-x:hover { border-color: var(--ao-bad); color: var(--ao-bad); }
+
+.ao-composer-add { font-size: 14px; line-height: 1; padding: 4px 10px; }
 
 .ao-jump-latest {
   position: sticky;

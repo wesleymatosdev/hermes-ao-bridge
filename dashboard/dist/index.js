@@ -482,21 +482,18 @@
   function Column(props) {
     const cards = props.cards;
     const split = splitLabel(cards);
-    return h("div", { className: "ao-column ao-column-" + (COLUMN_CLASS[props.id] || "") + (props.collapsed ? " ao-collapsed" : "") },
-      h("div", { className: "ao-column-head", onClick: props.onToggle },
+    return h("div", { className: "ao-column ao-column-" + (COLUMN_CLASS[props.id] || "") },
+      h("div", { className: "ao-column-head" },
         h("span", { className: "ao-column-label" }, props.label),
         h("span", { className: "ao-column-count" }, cards.length),
         split ? h("span", { className: "ao-column-split" }, split) : null
       ),
-      props.collapsed
-        ? null
-        : h("div", { className: "ao-column-body" },
-            cards.length === 0
-              ? h("div", { className: "ao-column-empty" }, "No sessions")
-              : cards.map(function (c) {
-                  return h(Card, { key: c.id, card: c, iconMap: props.iconMap, openLinks: props.openLinks, onChanged: props.onChanged, onMessage: props.onMessage, onOpen: props.onOpen });
-                })
-          )
+      h("div", { className: "ao-column-body" },
+        cards.length === 0
+          ? h("div", { className: "ao-column-empty" }, "No sessions")
+          : cards.map(function (c) {
+              return h(Card, { key: c.id, card: c, iconMap: props.iconMap, openLinks: props.openLinks, onChanged: props.onChanged, onMessage: props.onMessage, onOpen: props.onOpen });
+            }))
     );
   }
 
@@ -544,6 +541,78 @@
             h("span", { className: "ao-orch-status" },
               c.displayStatus || c.status || ""),
             h("span", { className: "ao-orch-age", title: c.updatedAt }, timeAgo(c.updatedAt)),
+            props.openLinks
+              ? h(OpenInAO, { projectId: c.projectId, sessionId: c.id,
+                              displayName: c.displayName,
+                              className: "ao-chip ao-chip-pr ao-orch-open" })
+              : null);
+        })
+      )
+    );
+  }
+
+  // --- Archive strip ---------------------------------------------------------
+  // Terminated sessions (backend "archived" population, split out of the
+  // columns like orchestrators) get the same quiet-strip treatment: a compact
+  // row per session — dim dot, name, project, harness, age — plus the one
+  // action a dead session can take: Restore, which rides the daemon's
+  // POST /sessions/{id}/restore (verified in the AO backend Controllers; a
+  // non-terminated session is refused with a typed conflict). A restored
+  // session relaunches and re-enters the board on the next snapshot. The
+  // strip hides entirely when nothing matches — it never announces an empty
+  // section — and stays visible under "Active only" (that toggle aims at the
+  // live board; hiding the archive here would defeat the strip's purpose).
+
+  function ArchiveStrip(props) {
+    const rows = props.archived;
+    const [busyId, setBusyId] = useState(null);
+    const [errById, setErrById] = useState({});
+    function restore(row) {
+      if (!window.confirm("Restore \"" + row.displayName + "\"? The session relaunches and re-enters the board.")) return;
+      setBusyId(row.id); setErrById({});
+      authedFetchJson(API + "/sessions/" + encodeURIComponent(row.id) + "/restore",
+                      { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" })
+        .then(function () { props.onChanged(); })
+        .catch(function (e) {
+          setErrById(function (prev) {
+            const next = {};
+            Object.keys(prev).forEach(function (k) { next[k] = prev[k]; });
+            next[row.id] = parseApiErrorMessage(e);
+            return next;
+          });
+        })
+        .finally(function () { setBusyId(null); });
+    }
+    return h("div", { className: "ao-orch-strip ao-arch-strip" },
+      h("div", { className: "ao-orch-head" },
+        h("span", { className: "ao-orch-title ao-arch-title" }, "Archive"),
+        h("span", { className: "ao-orch-count" }, rows.length)),
+      h("div", { className: "ao-orch-rows" },
+        rows.map(function (c) {
+          const err = errById[c.id];
+          return h("div", {
+            key: c.id,
+            className: "ao-orch-row",
+            onClick: function () { props.onOpen(c); },
+            title: "Click for session detail",
+          },
+            h("span", { className: "ao-orch-dot ao-orch-dot-" + stateOf(c),
+                        title: (STATE_LABELS[stateOf(c)] || c.displayStatus || c.status || "archived"),
+                        "aria-label": "status: archived" }),
+            h("span", { className: "ao-orch-name", title: c.displayName }, c.displayName),
+            h(HarnessChip, { harness: c.harness, iconMap: props.iconMap }),
+            h("span", { className: "ao-orch-project", title: c.projectId || "standalone" }, c.project),
+            err
+              ? h("span", { className: "ao-orch-status ao-arch-error", title: err }, err)
+              : h("span", { className: "ao-orch-status" },
+                  (c.displayStatus || c.status || "archived")),
+            h("span", { className: "ao-orch-age", title: c.updatedAt }, timeAgo(c.updatedAt)),
+            h("button", {
+              className: "ao-btn ao-btn-ghost ao-arch-restore",
+              disabled: busyId === c.id,
+              title: "Relaunch this archived session — it re-enters the board",
+              onClick: function (e) { e.stopPropagation(); restore(c); },
+            }, busyId === c.id ? "Restoring…" : "Restore"),
             props.openLinks
               ? h(OpenInAO, { projectId: c.projectId, sessionId: c.id,
                               displayName: c.displayName,
@@ -688,13 +757,54 @@
   // one gets a new turn — AO-native semantics from one route. The daemon
   // records origin=human, so board messages render as "End user" and arrive
   // in the transcript through the sheet's live WS follow right after the send.
+  //
+  // Images (v0.6.0): the daemon's steer-or-send accepts native image blocks
+  // ({"mimeType", "data"}, standard base64 — verified in the AO backend
+  // Controllers), so pasted/dropped/picked images ride along as attachments.
+  // They preview above the input until send. Text stays REQUIRED: the daemon
+  // refuses a bare-attachment steer (CHAT_STEER_TEXT_REQUIRED), so the local
+  // limits mirror that honestly (8 images, 10 MB each, 25 MB total, raster
+  // image/* only — SVG is blocked daemon-side as active content).
+
+  const COMPOSER_MAX_IMAGES = 8;
+  const COMPOSER_IMAGE_MAX_BYTES = 10 * 1024 * 1024;
+  const COMPOSER_IMAGES_MAX_TOTAL_BYTES = 25 * 1024 * 1024;
+
+  function isImageFile(f) {
+    return (f && (f.type || "").indexOf("image/") === 0 && f.type !== "image/svg+xml");
+  }
+
+  function readImageAsBase64(file) {
+    return new Promise(function (resolve, reject) {
+      const r = new FileReader();
+      r.onload = function () {
+        const dataUrl = String(r.result || "");
+        const comma = dataUrl.indexOf(",");
+        resolve(comma === -1 ? "" : dataUrl.slice(comma + 1));
+      };
+      r.onerror = function () { reject(new Error("Could not read " + (file.name || "image"))); };
+      r.readAsDataURL(file);
+    });
+  }
 
   function Composer(props) {
     const [text, setText] = useState("");
+    const [images, setImages] = useState([]);
     const [busy, setBusy] = useState(false);
     const [err, setErr] = useState(null);
     const [sentNote, setSentNote] = useState("");
     const taRef = useRef(null);
+    const fileRef = useRef(null);
+    const imagesRef = useRef([]);
+
+    function setImagesAndRef(next) {
+      imagesRef.current = next;
+      setImages(next);
+    }
+
+    function dropImages(list) {
+      list.forEach(function (im) { if (im.url) URL.revokeObjectURL(im.url); });
+    }
 
     // One-click steer: the card "Message" affordance opens the sheet with the
     // composer ready to type.
@@ -710,6 +820,50 @@
       return function () { window.clearTimeout(t); };
     }, [sentNote]);
 
+    // Object URLs outlive the send — release them when the sheet closes.
+    useEffect(function () {
+      return function () { dropImages(imagesRef.current); };
+    }, []);
+
+    function addFiles(fileList) {
+      const files = Array.from(fileList || []).filter(isImageFile);
+      if (!files.length) return;
+      setErr(null);
+      const room = COMPOSER_MAX_IMAGES - imagesRef.current.length;
+      if (files.length > room) {
+        setErr("At most " + COMPOSER_MAX_IMAGES + " images per message");
+      }
+      const take = files.slice(0, Math.max(0, room));
+      const tooBig = take.find(function (f) { return f.size > COMPOSER_IMAGE_MAX_BYTES; });
+      if (tooBig) { setErr("Image \"" + (tooBig.name || "image") + "\" is too large (max 10 MB)"); return; }
+      const existingBytes = imagesRef.current.reduce(function (sum, im) { return sum + im.bytes; }, 0);
+      const addBytes = take.reduce(function (sum, f) { return sum + f.size; }, 0);
+      if (existingBytes + addBytes > COMPOSER_IMAGES_MAX_TOTAL_BYTES) {
+        setErr("Images are too large in total (max 25 MB)");
+        return;
+      }
+      take.forEach(function (f) {
+        readImageAsBase64(f).then(function (data) {
+          if (!data) { setErr("Could not read " + (f.name || "image")); return; }
+          setImagesAndRef(imagesRef.current.concat([{
+            name: f.name || "image", mimeType: f.type, data: data,
+            bytes: f.size, url: URL.createObjectURL(f),
+          }]));
+        }).catch(function (e) { setErr(e.message); });
+      });
+    }
+
+    function removeImage(idx) {
+      const next = imagesRef.current.slice();
+      dropImages(next.splice(idx, 1));
+      setImagesAndRef(next);
+    }
+
+    function clearImages() {
+      dropImages(imagesRef.current);
+      setImagesAndRef([]);
+    }
+
     function submit() {
       if (busy) return;
       if (!text.trim()) { setErr("Message must not be empty"); return; }
@@ -717,10 +871,16 @@
       authedFetchJson(API + "/sessions/" + encodeURIComponent(props.sessionId) + "/steer", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message: text }),
+        body: JSON.stringify({
+          message: text,
+          attachments: imagesRef.current.map(function (im) {
+            return { mimeType: im.mimeType, data: im.data };
+          }),
+        }),
       })
         .then(function (resp) {
           setText("");
+          clearImages();
           setSentNote(resp && resp.outcome === "steered"
             ? "Sent — steered into the working turn"
             : "Sent — new turn queued");
@@ -729,22 +889,70 @@
         .finally(function () { setBusy(false); });
     }
 
-    return h("div", { className: "ao-composer" },
+    return h("div", {
+      className: "ao-composer",
+      // Only image drops are intercepted; a text drop must keep reaching the
+      // textarea's own handler.
+      onDragOver: function (e) {
+        const dt = e.dataTransfer;
+        if (dt && Array.from(dt.items || []).some(function (t) {
+          return t.kind === "file" && t.type.indexOf("image/") === 0 && t.type !== "image/svg+xml";
+        })) e.preventDefault();
+      },
+      onDrop: function (e) {
+        const dt = e.dataTransfer;
+        if (!dt) return;
+        const hasImages = Array.from(dt.files || []).some(isImageFile);
+        if (!hasImages) return;
+        e.preventDefault();
+        addFiles(dt.files);
+      },
+    },
       h("textarea", {
         ref: taRef, className: "ao-input ao-textarea ao-composer-input", rows: 2,
         value: text,
         placeholder: props.working
           ? "Steer this session — delivered while it works…"
-          : "Message this session…",
+          : "Message this session…  (paste or drop an image to attach it)",
         onChange: function (e) { setText(e.target.value); },
+        onPaste: function (e) {
+          const files = Array.from((e.clipboardData && e.clipboardData.items) || [])
+            .filter(function (item) { return item.kind === "file"; })
+            .map(function (item) { return item.getAsFile(); })
+            .filter(isImageFile);
+          if (files.length) { e.preventDefault(); addFiles(files); }
+        },
         onKeyDown: function (e) {
           if ((e.metaKey || e.ctrlKey) && e.key === "Enter") { e.preventDefault(); submit(); }
         },
       }),
+      images.length
+        ? h("div", { className: "ao-composer-images" },
+            images.map(function (im, i) {
+              return h("span", { className: "ao-composer-image", key: i, title: im.name },
+                h("img", { src: im.url, alt: im.name }),
+                h("button", {
+                  className: "ao-composer-image-x", title: "Remove image",
+                  "aria-label": "Remove image " + (i + 1),
+                  onClick: function () { removeImage(i); },
+                }, "×"));
+            }))
+        : null,
       err ? h("div", { className: "ao-sheet-error" }, err) : null,
       sentNote ? h("div", { className: "ao-composer-sent" }, sentNote) : null,
       h("div", { className: "ao-composer-actions" },
         h("span", { className: "ao-composer-hint" }, "⌘⏎ to send"),
+        h("input", {
+          ref: fileRef, type: "file", accept: "image/*", multiple: true,
+          style: { display: "none" },
+          onChange: function (e) { addFiles(e.target.files); e.target.value = ""; },
+        }),
+        h("button", {
+          className: "ao-btn ao-btn-ghost ao-composer-add",
+          title: "Attach images (paste and drag-drop work too)",
+          disabled: busy || images.length >= COMPOSER_MAX_IMAGES,
+          onClick: function () { if (fileRef.current) fileRef.current.click(); },
+        }, "🖼"),
         h("button", { className: "ao-btn ao-btn-primary", disabled: busy || !text.trim(),
                       onClick: submit }, busy ? "Sending…" : "Send")));
   }
@@ -1272,9 +1480,10 @@
     const [detailTargetId, setDetailTargetId] = useState(null);
     // Derive the detail card from the live board so the sheet re-renders (and
     // refetches, via the plan-writtenAt effect below) on WS pushes. A click
-    // from either population (worker card or orchestrator row) lands here.
+    // from any population (worker card, orchestrator row, archive row) lands
+    // here.
     const allSessions = useMemo(function () {
-      return data ? (data.cards || []).concat(data.orchestrators || []) : [];
+      return data ? (data.cards || []).concat(data.orchestrators || [], data.archived || []) : [];
     }, [data]);
     const detailCard = detailTargetId
       ? allSessions.find(function (c) { return c.id === detailTargetId; }) || null
@@ -1290,10 +1499,6 @@
     const [activeOnly, setActiveOnly] = useState(function () {
       try { return window.localStorage.getItem("ao-bridge.activeOnly") !== "0"; }
       catch (_e) { return true; }
-    });
-    const [collapsed, setCollapsed] = useState(function () {
-      try { return window.localStorage.getItem("ao-bridge.collapsed") === "archive"; }
-      catch (_e) { return false; }
     });
     const timerRef = useRef(null);
     const wsRef = useRef(null);
@@ -1421,14 +1626,6 @@
       };
     }, [refresh]);
 
-    function toggleArchive() {
-      setCollapsed(function (prev) {
-        const next = !prev;
-        try { window.localStorage.setItem("ao-bridge.collapsed", next ? "archive" : ""); } catch (_e) {}
-        return next;
-      });
-    }
-
     function setRecencyPersisted(id) {
       setRecency(id);
       try { window.localStorage.setItem("ao-bridge.recency", id); } catch (_e) {}
@@ -1462,9 +1659,13 @@
       return Object.keys(seen).sort();
     }, [allSessions]);
 
-    // One filter pass shared by both populations, so search and every
-    // dropdown/toggle behave identically for workers and orchestrators.
-    const matchesFilters = useCallback(function (c) {
+    // One filter pass shared by every population, so search and each
+    // dropdown/toggle behave identically for workers, orchestrators and the
+    // archive. The archive strip opts out of the two live-board gates
+    // (Active-only and the recency window) — it exists to surface history.
+    const filterSession = useCallback(function (c, opts) {
+      const applyActiveOnly = !opts || opts.activeOnly !== false;
+      const applyRecency = !opts || opts.recency !== false;
       const q = query.trim().toLowerCase();
       if (q
           && (c.project || "").toLowerCase().indexOf(q) === -1
@@ -1474,17 +1675,24 @@
           && (c.displayStatus || c.status || "").toLowerCase() !== statusFilter) return false;
       if (projectFilter !== "all" && (c.projectId || "") !== projectFilter) return false;
       if (harnessFilter !== "all" && (c.harness || "").trim() !== harnessFilter) return false;
-      // "Active only" means a LIVE TURN — idle sessions (finished agents
-      // still parked on their AO column) are not active and hide with it.
-      if (activeOnly && stateOf(c) !== "working") return false;
-      const bucket = RECENCY_OPTIONS.find(function (r) { return r.id === recency; });
-      const cutoffMs = bucket && bucket.ms ? Date.now() - bucket.ms : 0;
-      if (cutoffMs) {
-        const ts = new Date(c.updatedAt || c.createdAt || "").getTime();
-        if (!isFinite(ts) || ts < cutoffMs) return false;
+      // "Active only" means a LIVE TURN (v0.5.1 semantics) — idle sessions
+      // hide with it; the archive strip opts out via applyActiveOnly=false.
+      if (applyActiveOnly && stateOf(c) !== "working") return false;
+      if (applyRecency) {
+        const bucket = RECENCY_OPTIONS.find(function (r) { return r.id === recency; });
+        const cutoffMs = bucket && bucket.ms ? Date.now() - bucket.ms : 0;
+        if (cutoffMs) {
+          const ts = new Date(c.updatedAt || c.createdAt || "").getTime();
+          if (!isFinite(ts) || ts < cutoffMs) return false;
+        }
       }
       return true;
     }, [query, statusFilter, projectFilter, harnessFilter, recency, activeOnly]);
+
+    const matchesFilters = useCallback(function (c) { return filterSession(c); }, [filterSession]);
+    const matchesArchiveFilters = useCallback(function (c) {
+      return filterSession(c, { activeOnly: false, recency: false });
+    }, [filterSession]);
 
     const columns = useMemo(function () {
       if (!data) return [];
@@ -1521,6 +1729,17 @@
       });
       return list;
     }, [data, matchesFilters]);
+
+    // Archived (terminated) workers — the backend splits them out of `cards`
+    // the way it splits orchestrators. Most-recently-updated first.
+    const archived = useMemo(function () {
+      if (!data) return [];
+      const list = (data.archived || []).filter(matchesArchiveFilters);
+      list.sort(function (a, b) {
+        return (b.updatedAt || b.createdAt || "").localeCompare(a.updatedAt || a.createdAt || "");
+      });
+      return list;
+    }, [data, matchesArchiveFilters]);
 
     return h("div", { className: "ao-bridge" },
       h("div", { className: "ao-header" },
@@ -1619,13 +1838,21 @@
                 h("div", { className: "ao-board-error-hint" },
                   "The AO daemon has not answered yet. Retries continue automatically — the board appears here the moment the daemon does."))
           : [
-              // Orchestrators live in one quiet strip above the columns; the
-              // strip hides itself when no orchestrator matches the filters.
+              // Orchestrators and the archive live in quiet strips above the
+              // columns; each strip hides itself when nothing matches.
               orchestrators.length
                 ? h(OrchestratorStrip, {
                     orchestrators: orchestrators, iconMap: iconMap,
                     openLinks: !!(data && data.openInAoLinks),
                     onOpen: function (card) { setDetailTargetId(card.id); },
+                  })
+                : null,
+              archived.length
+                ? h(ArchiveStrip, {
+                    archived: archived, iconMap: iconMap,
+                    openLinks: !!(data && data.openInAoLinks),
+                    onOpen: function (card) { setDetailTargetId(card.id); },
+                    onChanged: refresh,
                   })
                 : null,
               h("div", { className: "ao-board" },
@@ -1634,8 +1861,6 @@
                     key: col.id, id: col.id, label: col.label, cards: col.cards,
                     iconMap: iconMap,
                     openLinks: !!(data && data.openInAoLinks),
-                    collapsed: col.id === "archive" && collapsed,
-                    onToggle: col.id === "archive" ? toggleArchive : undefined,
                     onChanged: refresh,
                     onMessage: function (card) {
                       setDetailTargetId(card.id);

@@ -56,6 +56,8 @@ class FakeAO:
         self.usage_rows: list[dict] = []         # GET /usage/sessions rows
         self.memory_rows: list[dict] = []        # GET /usage/sessions/memory rows
         self.session_usage: dict[str, dict] = {}  # GET /usage/sessions/{id} bodies
+        self.restored: list[str] = []
+        self.restore_error: Optional[tuple] = None  # (code, status, message)
         self.healthz_ok = True
         self.spawn_status = 201
         self.send_status = 200
@@ -213,6 +215,27 @@ class _Handler(BaseHTTPRequestHandler):
             ao.pins.append((self._session_id(), True))
             session["isPinned"] = True
             return self._json(200, {"session": session})
+        if path.endswith("/restore"):
+            # Wire truth (AO backend sessions.go, 2026-11-09): only a
+            # terminated session is restorable — otherwise a typed conflict.
+            session = ao.sessions_by_id.get(self._session_id())
+            if session is None:
+                return self._json(404, {"error": "not found"})
+            if not session.get("isTerminated"):
+                return self._json(409, {"error": "conflict", "code": "SESSION_NOT_RESTORABLE",
+                                        "message": "session is not terminated", "requestId": "fake"})
+            if ao.restore_error is not None:
+                code, status, message = ao.restore_error
+                return self._json(status, {"error": "conflict", "code": code,
+                                           "message": message, "requestId": "fake"})
+            ao.restored.append(self._session_id())
+            session["isTerminated"] = False
+            session["status"] = "idle"
+            return self._json(200, {"ok": True, "sessionId": self._session_id(),
+                                    "restoreMode": "native",
+                                    "session": {"id": self._session_id(),
+                                                "displayName": session.get("displayName"),
+                                                "status": session["status"]}})
         return self._json(404, {"error": "no such route"})
 
     def do_DELETE(self):

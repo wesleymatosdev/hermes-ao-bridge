@@ -18,13 +18,22 @@ AO wire contract (verified against the live daemon and the AO backend source):
 - POST /api/v1/sessions                        spawn (201, {"session": {...}})
 - POST /api/v1/sessions/{id}/send              {"message", "userAuthored"}
 - POST /api/v1/sessions/{id}/conversation/steer-or-send
-                                               {"text", "clientMessageId"} -> 202
+                                               {"text", "clientMessageId",
+                                                "attachments"?} -> 202
                                                {"outcome": "steered"|"sent", ...};
                                                body field is "text" (not "message"),
                                                the idempotency handle is REQUIRED
                                                (missing -> 409 CHAT_STEER_UNCERTAIN),
-                                               messages land with origin=human
+                                               messages land with origin=human;
+                                               attachments are native image blocks
+                                               [{"mimeType", "data"}] (base64, no
+                                               data: prefix; <=10 MiB/image,
+                                               <=25 MiB total, <=8 images)
 - POST /api/v1/sessions/{id}/kill
+- POST /api/v1/sessions/{id}/restore           -> 200 {"ok", "sessionId",
+                                               "restoreMode", "session"} (daemon
+                                               relaunches a terminated session;
+                                               non-terminated -> typed conflict)
 - GET  /api/v1/reports?projectId=<id>          -> {"reports": [...]} (relay, opt-in)
 - GET  /api/v1/usage/sessions                  -> {"sessions": [{sessionId,
                                                   processedTokens, totalTokens,
@@ -41,6 +50,7 @@ AO wire contract (verified against the live daemon and the AO backend source):
 from __future__ import annotations
 
 import asyncio
+import base64
 import calendar
 import hashlib
 import json
@@ -95,15 +105,17 @@ def _manifest_version() -> str:
 PLUGIN_VERSION = _manifest_version()
 
 # Board columns, in display order. AO session state maps onto these via
-# ``column_for`` below; Archive holds terminated sessions.
-COLUMN_ORDER = ["queued", "running", "review", "blocked", "done", "archive"]
+# ``column_for`` below. Terminated sessions (``column_for`` == "archive") do
+# not take a column: like orchestrators, they are split out of ``cards``
+# server-side into ``archived`` and rendered as one quiet strip above the
+# board (v0.6.1), where each row carries a Restore action.
+COLUMN_ORDER = ["queued", "running", "review", "blocked", "done"]
 COLUMN_LABELS = {
     "queued": "Queued",
     "running": "Running",
     "review": "Review",
     "blocked": "Blocked",
     "done": "Done",
-    "archive": "Archive",
 }
 
 # Harnesses offered in the spawn form. The daemon accepts far more (see the
@@ -399,17 +411,25 @@ class AOClient:
         return self.request("POST", f"/api/v1/sessions/{sid}/send",
                             {"message": message, "userAuthored": user_authored})
 
-    def steer_or_send(self, session_id: str, text: str, client_message_id: str) -> dict:
+    def steer_or_send(self, session_id: str, text: str, client_message_id: str,
+                      attachments: Optional[list] = None) -> dict:
         """AO-native steer-or-send: steers a session whose turn is in flight,
         queues a new turn on an idle one (verified live, 2026-11-09). Wire
         quirks that are easy to get wrong: the body field is ``text`` (not
         ``message``), and the daemon REQUIRES the ``clientMessageId``
         idempotency handle — without it every request answers 409
         CHAT_STEER_UNCERTAIN. Messages land with origin=human, so they render
-        as "End user" in the transcript."""
+        as "End user" in the transcript.
+
+        ``attachments`` are native image prompt blocks ({"mimeType", "data"},
+        data = standard base64, no data: URL prefix) delivered with the
+        message — daemon contract verified in the AO backend Controllers
+        (ConversationImageContentRequest, decoded by conversationContent)."""
         sid = urllib.parse.quote(session_id, safe="")
-        return self.request("POST", f"/api/v1/sessions/{sid}/conversation/steer-or-send",
-                            {"text": text, "clientMessageId": client_message_id})
+        body: dict = {"text": text, "clientMessageId": client_message_id}
+        if attachments:
+            body["attachments"] = attachments
+        return self.request("POST", f"/api/v1/sessions/{sid}/conversation/steer-or-send", body)
 
     def kill(self, session_id: str) -> dict:
         sid = urllib.parse.quote(session_id, safe="")
@@ -444,6 +464,15 @@ class AOClient:
         {sessionId, rssBytes, cpuPercent, sampledAt, processes}."""
         resp = self.request("GET", "/api/v1/usage/sessions/memory")
         return resp.get("sessions") or []
+
+    def restore(self, session_id: str) -> dict:
+        """Relaunch a terminated (archived) session. Daemon route verified in
+        the AO backend Controllers (sessions.go): POST .../restore answers 200
+        {"ok", "sessionId", "restoreMode" ("native"|"saved_prompt"|"fresh"),
+        "session"}; a non-terminated session is refused with a typed conflict."""
+        sid = urllib.parse.quote(session_id, safe="")
+        return self.request("POST", f"/api/v1/sessions/{sid}/restore", {})
+
     def reports(self, project_id: str) -> list:
         resp = self.request("GET", "/api/v1/reports?" + urllib.parse.urlencode({"projectId": project_id}))
         return resp.get("reports") or []
@@ -687,8 +716,13 @@ def board_snapshot(ao: Optional[AOClient] = None) -> dict:
     sessions = ao.sessions()
     all_cards = [card_for(s, project_names, usage_by_id, memory_by_id) for s in sessions]
     _attach_plans(all_cards, ao)
-    cards = [c for c in all_cards if (c.get("kind") or "worker") != "orchestrator"]
+    workers = [c for c in all_cards if (c.get("kind") or "worker") != "orchestrator"]
     orchestrators = [c for c in all_cards if c.get("kind") == "orchestrator"]
+    # Archived workers (terminated) join the Archive strip, not a column —
+    # same split the orchestrators get, so the columns stay meaningful.
+    cards = [c for c in workers if c.get("column") != "archive"]
+    archived = [c for c in workers if c.get("column") == "archive"]
+    archived.sort(key=lambda c: c.get("updatedAt") or c.get("createdAt") or "", reverse=True)
     by_column = {c: [] for c in COLUMN_ORDER}
     for card in cards:
         by_column.setdefault(card["column"], []).append(card)
@@ -707,6 +741,7 @@ def board_snapshot(ao: Optional[AOClient] = None) -> dict:
         ],
         "cards": cards,
         "orchestrators": orchestrators,
+        "archived": archived,
         "openInAoLinks": open_in_ao_links(),
         "counts": {c: len(by_column[c]) for c in by_column},
     }
@@ -798,6 +833,7 @@ class SpawnBody(BaseModel):
 class SendBody(BaseModel):
     message: str
     user_authored: bool = Field(True, alias="userAuthored")
+    attachments: list[dict] = Field(default_factory=list)
 
     model_config = {"populate_by_name": True}
 
@@ -937,19 +973,76 @@ def send(session_id: str, body: SendBody):
     return {"ok": True, "sessionId": session_id}
 
 
+# Image attachment limits — mirrored from the daemon's conversation gate (AO
+# backend Controllers, 2026-11-09): decoded per-image 10 MiB, total 25 MiB,
+# at most 8 images; only raster image/* MIME types (the chat service turns
+# attachments into native image blocks, and SVG is blocked daemon-side as
+# active content). Enforcing here gives the composer an honest local error
+# instead of a daemon round-trip per mistake.
+STEER_IMAGE_MAX_BYTES = 10 << 20
+STEER_IMAGES_MAX_TOTAL_BYTES = 25 << 20
+STEER_IMAGES_MAX_COUNT = 8
+
+
+def _steer_attachments(raw: list) -> list:
+    """Validate composer image attachments into the daemon's wire shape
+    ([{"mimeType", "data"}], data = standard base64 without the data: URL
+    prefix). Raises HTTPException(422) naming the first problem."""
+    if not isinstance(raw, list):
+        raise HTTPException(status_code=422, detail="attachments must be a list")
+    if len(raw) > STEER_IMAGES_MAX_COUNT:
+        raise HTTPException(status_code=422,
+                            detail=f"At most {STEER_IMAGES_MAX_COUNT} images per message")
+    out: list = []
+    total = 0
+    for item in raw:
+        if not isinstance(item, dict):
+            raise HTTPException(status_code=422, detail="Each attachment must be an object")
+        mime = str(item.get("mimeType") or "").strip().lower()
+        data = str(item.get("data") or "").strip()
+        if not mime.startswith("image/") or mime == "image/svg+xml":
+            raise HTTPException(
+                status_code=422,
+                detail="Only image attachments are supported (SVG is not allowed)")
+        if data.startswith("data:"):
+            raise HTTPException(
+                status_code=422,
+                detail="Attachment data must be bare base64 — strip the data: URL prefix")
+        try:
+            decoded = base64.b64decode(data, validate=True)
+        except Exception:
+            raise HTTPException(
+                status_code=422,
+                detail="Attachment data must be standard base64 (no data: URL prefix)")
+        if not decoded:
+            raise HTTPException(status_code=422, detail="Attachment is empty")
+        total += len(decoded)
+        if len(decoded) > STEER_IMAGE_MAX_BYTES:
+            raise HTTPException(status_code=422,
+                                detail="Image is too large (max 10 MB)")
+        if total > STEER_IMAGES_MAX_TOTAL_BYTES:
+            raise HTTPException(status_code=422,
+                                detail="Images are too large in total (max 25 MB)")
+        out.append({"mimeType": mime, "data": data})
+    return out
+
+
 @router.post("/sessions/{session_id}/steer")
 def steer(session_id: str, body: SendBody):
     """Steer-or-send — the AO-native message delivery (NOT the queue-only
     /send): a session whose turn is in flight gets steered mid-turn, an idle
     one gets a new turn. The idempotency handle is minted here per request;
     the daemon rejects a duplicate handle, so a client retry with the same
-    text mints a new handle and is a deliberate second delivery."""
+    text mints a new handle and is a deliberate second delivery. Composer
+    image attachments ride along as native image prompt blocks."""
     ao = client()
     if not body.message.strip():
         raise HTTPException(status_code=422, detail="Message must not be empty")
+    attachments = _steer_attachments(body.attachments)
     try:
         resp = ao.steer_or_send(session_id, body.message,
-                                client_message_id=uuid.uuid4().hex)
+                                client_message_id=uuid.uuid4().hex,
+                                attachments=attachments)
     except AOApiError as err:
         _raise_steer_error(err)
     return {"ok": True, "sessionId": session_id,
@@ -1007,6 +1100,25 @@ def unpin(session_id: str):
     except AOApiError as err:
         _raise_mapped(err)
     return {"ok": True, "sessionId": session_id, "pinned": False}
+
+@router.post("/sessions/{session_id}/restore")
+def restore(session_id: str):
+    """Relaunch a terminated (archived) session — daemon-native restore, the
+    same operation the AO desktop app's Restore runs. The daemon picks the
+    mode (native resume / saved prompt / fresh); the session re-enters the
+    board on the next snapshot. A non-terminated session is refused by the
+    daemon with a typed conflict, mapped through like any other error."""
+    ao = client()
+    try:
+        resp = ao.restore(session_id)
+    except AOApiError as err:
+        _raise_mapped(err)
+    sess = (resp or {}).get("session") or {}
+    return {"ok": True, "sessionId": session_id,
+            "restoreMode": (resp or {}).get("restoreMode") or "",
+            "session": {"id": sess.get("id") or session_id,
+                        "displayName": sess.get("displayName") or "",
+                        "status": sess.get("status") or ""}}
 
 
 TRANSCRIPT_TAIL_LINES = 200
@@ -1140,6 +1252,57 @@ def ao_deep_link(project_id: str, session_id: str) -> str:
     return f"{AO_DEEP_LINK_SCHEME}://sessions/{sid}"
 
 
+def hoist_inverted_reasoning(conv: dict) -> None:
+    """Render-order repair for Thinking rows, in place on the raw snapshot.
+
+    Wire truth (live probe on a working session, 2026-11-09): reasoning and
+    messages share the ``sequence`` numbering space and the daemon normally
+    sequences a thought BEFORE the assistant message it introduces. But
+    reasoning streams while its message streams — a harness that re-sequences
+    the activity when a revision lands can leave a thought's sequence AFTER
+    its own message, and the transcript (sorted by sequence) would then render
+    the Thinking row below the speech it belongs to (seen as a board
+    screenshot on a live worker card).
+
+    ``createdAt`` is the ground truth for pairing: it is set at first write
+    and survives sequence churn, so a thought belongs to the next assistant
+    message of the SAME turn by creation time. Where the sequence is inverted,
+    this pass rewrites that activity's ``sequence`` on the raw conversation to
+    sort just below its message — the transcript tail and the activity
+    reduction then carry the adjusted key through the normal paths, and the
+    frontend merge (`timelineItems`) renders thinking first with no frontend
+    change. Commands and mcp_tool rows keep their sequences, so their
+    interleaving is untouched; on wire shapes that are already ordered (every
+    session probed live) the pass is a no-op.
+    """
+    messages = [m for m in (conv.get("messages") or []) if isinstance(m, dict)]
+    assistant = [m for m in messages
+                 if (m.get("role") or "").lower() == "assistant"
+                 and isinstance(m.get("sequence"), (int, float))]
+    thoughts = [a for a in (conv.get("activities") or [])
+                if isinstance(a, dict) and a.get("activityKind") == "reasoning"
+                and isinstance(a.get("sequence"), (int, float))]
+    hoist_seq: dict[int, int] = {}  # message sequence -> hoisted count (epsilon stagger)
+    # Latest thought first, so its epsilon slot sits closest below the
+    # message: among several hoisted thoughts, the earliest-streamed one gets
+    # the smallest key and keeps rendering first.
+    for act in sorted(thoughts, key=lambda a: str(a.get("createdAt") or ""), reverse=True):
+        seq = act["sequence"]
+        created = str(act.get("createdAt") or "")
+        turn = act.get("turnId")
+        candidates = [m for m in assistant
+                      if (not turn or m.get("turnId") == turn)
+                      and (str(m.get("createdAt") or "")) >= created]
+        if not candidates:
+            continue  # trailing thought (mid-turn stream) — nothing to precede
+        msg = min(candidates, key=lambda m: ((str(m.get("createdAt") or "")), m["sequence"]))
+        if seq <= msg["sequence"]:
+            continue  # already ordered — leave the wire value alone
+        n = hoist_seq.get(msg["sequence"], 0) + 1
+        hoist_seq[msg["sequence"]] = n
+        act["sequence"] = msg["sequence"] - n * 1e-6
+
+
 def detail_payload(ao: AOClient, session_id: str) -> dict:
     """Read-only card detail: session metadata + bounded transcript tail +
     tool-execution activities.
@@ -1153,6 +1316,10 @@ def detail_payload(ao: AOClient, session_id: str) -> dict:
     messages = conv.get("messages") or []
     if not isinstance(messages, list):
         messages = []
+    # Thinking-order repair runs on the raw snapshot BEFORE any reduction, so
+    # the adjusted sequences flow into both the transcript tail and the
+    # activity payload unchanged.
+    hoist_inverted_reasoning(conv)
     turns = conv.get("turns") if isinstance(conv.get("turns"), list) else []
     tail = messages[-TRANSCRIPT_TAIL_LINES:]
     project_id = sess.get("projectId") or ""

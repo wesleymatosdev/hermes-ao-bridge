@@ -59,7 +59,9 @@ class ColumnMappingTest(unittest.TestCase):
             self.assertEqual(column_for(make_session("s1", status=status)), "running", status)
 
     def test_column_order_covers_all_mapped_columns(self):
-        for column in ("archive", "done", "review", "blocked", "queued", "running"):
+        # "archive" is intentionally absent since v0.6.0: terminated workers
+        # join the `archived` strip population, not a board column.
+        for column in ("done", "review", "blocked", "queued", "running"):
             self.assertIn(column, card_for)
 
 
@@ -93,11 +95,13 @@ class BoardSnapshotTest(unittest.TestCase):
         ao = FakeAOFromFixtures()
         snapshot = plugin_api.board_snapshot(ao)
         self.assertEqual(snapshot["counts"]["done"], 1)
-        self.assertEqual(snapshot["counts"]["archive"], 1)
         self.assertEqual(snapshot["counts"]["running"], 1)
+        self.assertNotIn("archive", snapshot["counts"])
         done_cards = [c for c in snapshot["cards"] if c["column"] == "done"]
         self.assertEqual(done_cards[0]["project"], "hermes-agent")
-        self.assertTrue(snapshot["columns"][0]["id"] in ("queued", "running", "review", "blocked", "done", "archive"))
+        self.assertTrue(snapshot["columns"][0]["id"] in ("queued", "running", "review", "blocked", "done"))
+        # Terminated workers leave the columns entirely (the strip population).
+        self.assertEqual([c["id"] for c in snapshot["archived"]], ["s-arch"])
 
 
 class FakeAOFromFixtures(FakeAO):

@@ -31,7 +31,7 @@ An **AO Bridge** tab appears in the dashboard.
 
 ## What you get
 
-**The board.** Columns `Queued · Running · Review · Blocked · Done · Archive`,
+**The board.** Columns `Queued · Running · Review · Blocked · Done`,
 mapped from live AO session state (exact rules below). Cards show project,
 **The board.** Columns `Queued · Running · Review · Blocked · Done · Archive`,
 mapped from live AO session state (exact rules below). Cards show project,
@@ -48,9 +48,9 @@ approval mode), steer and message sessions without leaving the board, pin and
 rename sessions from the detail sheet, and archive sessions (with
 confirmation — archiving terminates the session via the daemon).
 
-| AO session state | Board column |
+| AO session state | Board surface |
 |---|---|
-| `isTerminated` / status `terminated` | Archive |
+| `isTerminated` / status `terminated` | Archive strip (below) |
 | status `merged` | Done |
 | status `review_pending` or `kanbanColumn: needs_review` | Review |
 | status `ci_failed` or `provisionState: failed` | Blocked |
@@ -75,8 +75,7 @@ filters for status, project and harness; a recency selector (last hour / 24h /
 that keeps only sessions with a live turn (idle, awaiting-PR, exited and
 archived sessions all hide with it). All filtering happens in
 the browser over the already-fetched board, and the filtered view still
-updates live. Recency, the active toggle, and the Archive column's
-collapse state persist across reloads.
+updates live. Recency and the active toggle persist across reloads.
 
 **Live updates.** A WebSocket stream pushes board changes the moment the
 daemon state moves (the backend re-checks AO about twice a second and only
@@ -107,7 +106,13 @@ still muted and italic. While a thought is actually being streamed, its row
 pulses — only the last reasoning entry can be live (mid-turn, every entry of
 the running turn reads `running`, so the backend marks liveness, not the
 raw status). Thinking is worker output: it hides and shows with the **Worker**
-chip, and has no filter chip of its own.
+chip, and has no filter chip of its own. Thinking always renders *before*
+the answer it belongs to: reasoning streams while its message streams, and a
+harness that re-sequences the activity can leave a thought's wire sequence
+after its own message — the backend pairs thoughts to messages by creation
+time (same turn) and repairs inverted sequences in the payload, so a Thinking
+row can never appear below the speech it introduced. Command/tool rows keep
+their exact wire positions.
 
 **Tool runs and plans.** The daemon's command and MCP-tool activities
 interleave with messages in order, kept visually quiet: one muted
@@ -129,6 +134,16 @@ queued"* — and daemon refusals (empty text, a harness that can't take
 mid-turn guidance, uncertain delivery) surface inline with the daemon's error
 code. The legacy queue-only `/send` route stays on the backend for
 compatibility.
+
+**Images in the composer.** Paste (⌘V), drag-drop, or the 🖼 picker attach
+images to a composer message; each attachment previews as a thumbnail until
+you send. Delivery rides the same steer-or-send route as native image
+prompt blocks (`attachments: [{mimeType, data}]`, standard base64 — the
+daemon's documented shape), so the harness sees exactly what the AO app
+sends. Caps mirror the daemon: raster images only (SVG is blocked
+daemon-side), 8 per message, 10 MB each, 25 MB total; text is still required
+(the daemon refuses a bare-attachment steer). A harness without image
+support answers with the daemon's own typed error.
 **Hermes session-store enrichment (hermes workers).** ACP — the protocol AO
 uses to watch harnesses — delivers a lossy view of a `hermes` worker: command
 outputs arrive truncated and oversized tool results degrade to a
@@ -162,6 +177,19 @@ orchestrators sort first and terminated history sinks to the bottom
 (scrollable, capped). Rows share every filter with the worker cards and open
 the same detail sheet. The strip hides itself when no orchestrator matches
 the filters.
+
+**Archive.** Terminated sessions never pile into a column: like orchestrators,
+the backend splits them into their own population and they render as one
+quiet strip above the board — a compact row each with name, project, harness,
+status and age (most recently updated first, scrollable). Text/status/
+project/harness filters apply; **Active only** and the recency window don't
+(the strip exists to surface history) and it hides itself when nothing
+matches. Each row has **Restore**: after a confirmation it calls the daemon's
+restore route — the same operation the AO app runs — and the session
+relaunches and re-enters the board live (native resume, saved-prompt replay,
+or a fresh runtime — the daemon picks the mode). Rows also open the usual
+read-only detail sheet, and a harness that can't be restored surfaces the
+daemon's typed conflict instead of pretending.
 
 **Open in AO — interim workaround, off by default.** The AO desktop app
 doesn't route session deep links yet (its open-url handler only knows the

@@ -1,4 +1,5 @@
-"""v0.6.0 contracts: data/rendering parity with the AO desktop app.
+"""v0.6.0/0.6.1 contracts: data/rendering parity with the AO desktop app
+(v0.6.0, another branch of work) plus the v0.6.1 board additions below.
 
 Everything here is a port of AO's own rendering semantics, verified against
 the AO frontend source (frontend/src/renderer, packages/product-ui) and the
@@ -20,6 +21,7 @@ live daemon on 2026-11-09:
   through exactly as the SpawnSessionRequest enum lists them.
 """
 
+import base64
 import os
 import unittest
 
@@ -217,7 +219,9 @@ class BoardDataParityTest(unittest.TestCase):
         self.assertGreaterEqual(running, 2)
         lane = snap["counts"]
         self.assertEqual(lane["queued"] + lane["running"] + lane["review"]
-                         + lane["blocked"] + lane["done"] + lane["archive"], 2)
+                         + lane["blocked"] + lane["done"], 2)
+        # v0.6.1: terminated workers leave the counts entirely (Archive strip).
+        self.assertNotIn("archive", lane)
 
 
 class PinRenameSpawnRoutesTest(unittest.TestCase):
@@ -341,3 +345,270 @@ class DetailDataParityTest(unittest.TestCase):
         payload = self.http.get(
             "/api/plugins/ao-bridge/sessions/s1/detail").json()
         self.assertIsNone(payload["usage"])
+
+
+# ---------------------------------------------------------------------------
+# v0.6.1: thinking-before-speech ordering, composer image paste, archive
+# strip with restore (wire-contract bullets live in the git history of the
+# original feature branch; the contracts themselves are asserted below).
+# ---------------------------------------------------------------------------
+
+def msg(seq, role, turn_id, created_at, text="body"):
+    return {"sequence": seq, "role": role, "turnId": turn_id,
+            "createdAt": created_at, "text": text, "origin": "human"}
+
+
+def reasoning(seq, turn_id, created_at, text="a thought"):
+    return {"activityKind": "reasoning", "status": "completed", "summary": "Reasoning",
+            "sequence": seq, "revision": 1, "turnId": turn_id, "createdAt": created_at,
+            "detail": {"text": text}}
+
+
+def command(seq, turn_id, created_at):
+    return {"activityKind": "command", "status": "completed", "summary": "ls",
+            "sequence": seq, "revision": 1, "turnId": turn_id, "createdAt": created_at,
+            "detail": {"command": "ls", "exitCode": 0}}
+
+
+def png_b64(size: int = 16) -> str:
+    return base64.b64encode(b"\x89PNG\r\n\x1a\n" + b"\x00" * size).decode("ascii")
+
+
+class BoardRouteTestBase(unittest.TestCase):
+    def setUp(self):
+        self.ao = FakeAO()
+        self.server = FakeAOServer(self.ao)
+        self.server.start()
+        self._old_env = os.environ.get("AO_BRIDGE_BASE_URL")
+        os.environ["AO_BRIDGE_BASE_URL"] = self.server.url
+        self.http = TestClient(make_app())
+
+    def tearDown(self):
+        if self._old_env is None:
+            os.environ.pop("AO_BRIDGE_BASE_URL", None)
+        else:
+            os.environ["AO_BRIDGE_BASE_URL"] = self._old_env
+        self.server.shutdown()
+        self.server.server_close()
+
+
+class ThinkingOrderHoistTest(BoardRouteTestBase):
+    """``hoist_inverted_reasoning``: the transcript render order must put a
+    thought before the assistant message it introduces — but only by touching
+    INVERTED reasoning sequences; every other row's sort key is wire truth."""
+
+    def detail(self):
+        return self.http.get("/api/plugins/ao-bridge/sessions/s1/detail").json()
+
+    def merged_order(self, body):
+        rows = ([("msg", m["sequence"], m["role"]) for m in body["transcript"]]
+                + [(a["activityKind"], a["sequence"], "") for a in body["activities"]])
+        rows.sort(key=lambda r: r[1])
+        return rows
+
+    def setUp_session(self, messages, activities):
+        self.ao.add_session(make_session("s1", project_id="hermes-agent"))
+        self.ao.set_conversation("s1", messages)
+        self.ao.set_activities("s1", activities)
+
+    def test_inverted_reasoning_renders_before_its_message(self):
+        # The bug shape (screenshot, card zcode-tui-ci-fix): the thought
+        # streamed first (createdAt 00:00:30) but its wire sequence landed
+        # after the message (3 > 2). The payload must re-key it between the
+        # user message and the assistant message.
+        self.setUp_session(
+            [msg(1, "user", "t1", "2026-01-01T00:00:00Z"),
+             msg(2, "assistant", "t1", "2026-01-01T00:01:00Z", "the answer")],
+            [reasoning(3, "t1", "2026-01-01T00:00:30Z", "thinking first")])
+        body = self.detail()
+        row = [a for a in body["activities"] if a["activityKind"] == "reasoning"][0]
+        self.assertLess(row["sequence"], 2)
+        self.assertGreater(row["sequence"], 1)
+        order = self.merged_order(body)
+        kinds = [(k, role) for k, _s, role in order]
+        self.assertLess(kinds.index(("reasoning", "")), kinds.index(("msg", "assistant")))
+
+    def test_already_ordered_reasoning_keeps_its_wire_sequence(self):
+        # Every session probed live carries thought-before-message already;
+        # the pass must be a no-op there (identity on good wire shapes).
+        self.setUp_session(
+            [msg(4, "assistant", "t1", "2026-01-01T00:01:00Z")],
+            [reasoning(3, "t1", "2026-01-01T00:00:30Z")])
+        body = self.detail()
+        row = [a for a in body["activities"] if a["activityKind"] == "reasoning"][0]
+        self.assertEqual(row["sequence"], 3)
+
+    def test_reasoning_of_another_turn_is_never_hoisted(self):
+        # A thought of turn t2 sequenced after t1's message belongs to t2's
+        # (later) message — the same-turn pairing must not drag it back.
+        self.setUp_session(
+            [msg(2, "assistant", "t1", "2026-01-01T00:01:00Z"),
+             msg(5, "assistant", "t2", "2026-01-01T00:05:00Z")],
+            [reasoning(3, "t2", "2026-01-01T00:04:00Z")])
+        body = self.detail()
+        row = [a for a in body["activities"] if a["activityKind"] == "reasoning"][0]
+        self.assertEqual(row["sequence"], 3)
+
+    def test_trailing_streaming_thought_is_left_alone(self):
+        # Mid-turn, the latest thought has no assistant message after it yet.
+        self.setUp_session(
+            [msg(2, "assistant", "t1", "2026-01-01T00:01:00Z")],
+            [reasoning(9, "t1", "2026-01-01T00:09:00Z")])
+        body = self.detail()
+        row = [a for a in body["activities"] if a["activityKind"] == "reasoning"][0]
+        self.assertEqual(row["sequence"], 9)
+
+    def test_command_and_tool_sequences_are_never_touched(self):
+        # The interleave of terminal/mcp_tool rows with everything else is the
+        # invariant the fix must preserve. The thought here was created after
+        # the last assistant message (a trailing/mid-turn thought), so nothing
+        # about it is inverted and nothing is re-keyed.
+        self.setUp_session(
+            [msg(1, "user", "t1", "2026-01-01T00:00:00Z"),
+             msg(4, "assistant", "t1", "2026-01-01T00:04:00Z")],
+            [command(2, "t1", "2026-01-01T00:00:30Z"),
+             reasoning(6, "t1", "2026-01-01T00:05:00Z")])
+        body = self.detail()
+        rows = {a["activityKind"]: a["sequence"] for a in body["activities"]}
+        self.assertEqual(rows["command"], 2)
+        self.assertEqual(rows["reasoning"], 6)
+
+    def test_thought_created_before_its_message_but_sequenced_after_hoists(self):
+        # Inversion by the wire, not the sequence gap: the thought streamed at
+        # 00:03 (before the 00:04 message) yet carries sequence 6 > 4 — same
+        # repair as the screenshot case.
+        self.setUp_session(
+            [msg(1, "user", "t1", "2026-01-01T00:00:00Z"),
+             msg(4, "assistant", "t1", "2026-01-01T00:04:00Z")],
+            [command(2, "t1", "2026-01-01T00:00:30Z"),
+             reasoning(6, "t1", "2026-01-01T00:03:00Z")])
+        body = self.detail()
+        rows = {a["activityKind"]: a["sequence"] for a in body["activities"]}
+        self.assertEqual(rows["command"], 2)
+        self.assertLess(rows["reasoning"], 4)
+        self.assertGreater(rows["reasoning"], 2)
+
+    def test_hoisted_thoughts_stay_in_stream_order(self):
+        # Two inverted thoughts of one turn hoist below the same message
+        # without swapping their relative order.
+        self.setUp_session(
+            [msg(1, "user", "t1", "2026-01-01T00:00:00Z"),
+             msg(8, "assistant", "t1", "2026-01-01T00:08:00Z")],
+            [reasoning(9, "t1", "2026-01-01T00:06:00Z", "first thought"),
+             reasoning(10, "t1", "2026-01-01T00:07:00Z", "second thought")])
+        body = self.detail()
+        rows = sorted([a for a in body["activities"] if a["activityKind"] == "reasoning"],
+                      key=lambda a: a["sequence"])
+        self.assertEqual([r["text"] for r in rows], ["first thought", "second thought"])
+        self.assertTrue(all(r["sequence"] < 8 for r in rows))
+
+
+class SteerAttachmentsTest(BoardRouteTestBase):
+    """Composer image paste: the steer route forwards the daemon's exact
+    attachment shape and refuses everything else it cannot mean."""
+
+    def setUp(self):
+        super().setUp()
+        self.ao.add_session(make_session("idle1", status="idle"))
+
+    def steer(self, attachments, message="look at this"):
+        return self.http.post(
+            "/api/plugins/ao-bridge/sessions/idle1/steer",
+            json={"message": message, "attachments": attachments})
+
+    def test_image_attachments_forward_in_the_documented_shape(self):
+        data = png_b64()
+        resp = self.steer([{"mimeType": "image/png", "data": data}])
+        self.assertEqual(resp.status_code, 200)
+        body = self.ao.steers[-1]["body"]
+        self.assertEqual(body["text"], "look at this")
+        self.assertEqual(body["attachments"],
+                         [{"mimeType": "image/png", "data": data}])
+
+    def test_no_attachments_keeps_the_body_free_of_the_field(self):
+        resp = self.steer([])
+        self.assertEqual(resp.status_code, 200)
+        self.assertNotIn("attachments", self.ao.steers[-1]["body"])
+
+    def test_non_image_mime_is_refused_locally(self):
+        resp = self.steer([{"mimeType": "application/pdf", "data": png_b64()}])
+        self.assertEqual(resp.status_code, 422)
+        self.assertEqual(self.ao.steers, [])
+
+    def test_svg_is_refused(self):
+        resp = self.steer([{"mimeType": "image/svg+xml", "data": png_b64()}])
+        self.assertEqual(resp.status_code, 422)
+
+    def test_data_url_prefix_is_refused(self):
+        resp = self.steer([{"mimeType": "image/png",
+                            "data": "data:image/png;base64," + png_b64()}])
+        self.assertEqual(resp.status_code, 422)
+
+    def test_invalid_base64_is_refused(self):
+        resp = self.steer([{"mimeType": "image/png", "data": "not!base64!"}])
+        self.assertEqual(resp.status_code, 422)
+
+    def test_over_the_daemon_per_image_cap_is_refused(self):
+        resp = self.steer([{"mimeType": "image/png", "data": png_b64(plugin_api.STEER_IMAGE_MAX_BYTES + 1)}])
+        self.assertEqual(resp.status_code, 422)
+
+    def test_over_the_daemon_image_count_cap_is_refused(self):
+        too_many = [{"mimeType": "image/png", "data": png_b64()}
+                    for _ in range(plugin_api.STEER_IMAGES_MAX_COUNT + 1)]
+        resp = self.steer(too_many)
+        self.assertEqual(resp.status_code, 422)
+
+    def test_limits_match_the_daemon_contract(self):
+        # The caps are mirrored from the daemon (conversationContent gate) —
+        # drift here would mean a locally-accepted message the daemon refuses.
+        self.assertEqual(plugin_api.STEER_IMAGE_MAX_BYTES, 10 << 20)
+        self.assertEqual(plugin_api.STEER_IMAGES_MAX_TOTAL_BYTES, 25 << 20)
+        self.assertEqual(plugin_api.STEER_IMAGES_MAX_COUNT, 8)
+
+
+class ArchiveStripTest(BoardRouteTestBase):
+    """Archived sessions: split out of the columns server-side; Restore rides
+    the daemon's restore route and a restored session re-enters the board."""
+
+    def test_terminated_workers_are_split_into_archived(self):
+        self.ao.add_session(make_session("live1", status="working", project_id="p1"))
+        self.ao.add_session(make_session("dead1", status="terminated", terminated=True))
+        self.ao.add_session(make_session("dead2", status="idle", terminated=True))
+        board = self.http.get("/api/plugins/ao-bridge/board").json()
+        ids = [c["id"] for c in board["cards"]]
+        self.assertNotIn("dead1", ids)
+        self.assertNotIn("dead2", ids)
+        self.assertIn("live1", ids)
+        self.assertEqual(sorted(c["id"] for c in board["archived"]), ["dead1", "dead2"])
+
+    def test_archive_is_no_longer_a_column(self):
+        board = self.http.get("/api/plugins/ao-bridge/board").json()
+        self.assertNotIn("archive", [c["id"] for c in board["columns"]])
+
+    def test_restore_forwards_and_reports_the_mode(self):
+        self.ao.add_session(make_session("dead1", status="terminated", terminated=True))
+        resp = self.http.post("/api/plugins/ao-bridge/sessions/dead1/restore")
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertTrue(body["ok"])
+        self.assertEqual(body["restoreMode"], "native")
+        self.assertEqual(self.ao.restored, ["dead1"])
+        # Restored: the session is live again, so the next board snapshot
+        # moves it out of the archive strip.
+        board = self.http.get("/api/plugins/ao-bridge/board").json()
+        self.assertEqual([c["id"] for c in board["archived"]], [])
+        self.assertIn("dead1", [c["id"] for c in board["cards"]])
+
+    def test_restore_of_a_live_session_is_a_conflict(self):
+        self.ao.add_session(make_session("live1", status="working"))
+        resp = self.http.post("/api/plugins/ao-bridge/sessions/live1/restore")
+        self.assertEqual(resp.status_code, 409)
+        self.assertEqual(self.ao.restored, [])
+
+    def test_restore_of_a_gone_session_is_404(self):
+        resp = self.http.post("/api/plugins/ao-bridge/sessions/who/restore")
+        self.assertEqual(resp.status_code, 404)
+
+
+if __name__ == "__main__":
+    unittest.main()
