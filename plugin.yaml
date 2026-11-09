@@ -12,3 +12,15 @@ config_schema:
     type: str
     default: http://127.0.0.1:3001
     description: Base URL of the local AO daemon REST API (loopback)
+  relay_enabled:
+    type: bool
+    default: false
+    description: Relay AO worker milestones into the configured Hermes session (opt-in; see README)
+  relay_session:
+    type: str
+    default: ""
+    description: Hermes session id to relay events into (required when relay_enabled; list candidates at GET /api/plugins/ao-bridge/relay/sessions)
+  relay_events:
+    type: list
+    default: []
+    description: Event kinds to relay; empty means all (report_done, report_checkpoint, report_stuck, report_needs_input, session_idle, session_exited, session_terminated)

@@ -18,6 +18,7 @@ AO wire contract (verified against the live daemon and the AO backend source):
 - POST /api/v1/sessions                        spawn (201, {"session": {...}})
 - POST /api/v1/sessions/{id}/send              {"message", "userAuthored"}
 - POST /api/v1/sessions/{id}/kill
+- GET  /api/v1/reports?projectId=<id>          -> {"reports": [...]} (relay, opt-in)
 """
 
 from __future__ import annotations
@@ -235,6 +236,10 @@ class AOClient:
     def kill(self, session_id: str) -> dict:
         sid = urllib.parse.quote(session_id, safe="")
         return self.request("POST", f"/api/v1/sessions/{sid}/kill", {})
+
+    def reports(self, project_id: str) -> list:
+        resp = self.request("GET", "/api/v1/reports?" + urllib.parse.urlencode({"projectId": project_id}))
+        return resp.get("reports") or []
 
 
 def client(timeout_s: float = 15.0, token: Optional[str] = None) -> AOClient:
@@ -818,3 +823,401 @@ async def events(ws: WebSocket):
             await ws.close()
         except Exception:
             pass
+
+
+# ---------------------------------------------------------------------------
+# AO event relay (opt-in): worker milestones -> the orchestrator's Hermes session
+#
+# Wesley's use case: worker completions/stalls from AO only arrive on the
+# orchestrator's AO-embedded conversation; when he chats with Hermes elsewhere
+# they never reach him. The relay watches the daemon on a backend-owned poll
+# loop and injects compact one-line milestones into ONE Hermes session chosen
+# by explicit config (``relay_session``), through the same sanctioned store
+# path async delegation completions use (``SessionDB.append_delegation_delivery``
+# — a durable user-role delivery row, folded into the session's next turn as
+# context and visible to transcript viewers immediately). No platform sends,
+# no secrets, no Telegram/Discord configuration: the target is a session id
+# and the transport is entirely Hermes core. The injected row becomes part of
+# that conversation — the agent sees it on the next turn and may act on it;
+# it does not itself wake an idle session.
+#
+# Why poll + diff rather than the daemon's event stream: the loopback REST API
+# is the surface this plugin is already built on (no credentials), while the
+# daemon's stream endpoints are either off-surface (WS on the paired port,
+# connection-password gated) or firehose-shaped (SSE /api/v1/events carries
+# only {"id"} per event and emits thousands of updates/minute on a busy
+# machine). A 5s diff-poll of sessions + per-project reports yields exactly
+# the transitions the relay cares about, dedupable by stable ids.
+# ---------------------------------------------------------------------------
+
+RELAY_POLL_SECONDS = 5.0
+RELAY_DEBOUNCE_SECONDS = 5.0
+RELAY_BATCH_MAX_LINES = 8
+RELAY_NOTE_LIMIT = 140
+
+RELAY_REPORT_STATES = ("done", "checkpoint", "stuck", "needs_input")
+RELAY_SESSION_FROM = "working"
+RELAY_SESSION_STATUSES = {"idle": "session_idle", "exited": "session_exited",
+                          "terminated": "session_terminated"}
+DEFAULT_RELAY_EVENTS = tuple(
+    [f"report_{s}" for s in RELAY_REPORT_STATES] + list(RELAY_SESSION_STATUSES.values()))
+REPORT_EMOJI = {"done": "✅", "checkpoint": "📍", "stuck": "🚨", "needs_input": "❓"}
+SESSION_EMOJI = {"session_idle": "💤", "session_exited": "🚪", "session_terminated": "🗄️"}
+
+# The seen/dedup state must not grow without bound across daemon restarts and
+# report churn; entries older than this are re-relayable (a day-old report
+# reappearing is news again).
+RELAY_SEEN_TTL_SECONDS = 24 * 3600.0
+
+
+class RelayEvent:
+    __slots__ = ("kind", "worker", "detail")
+
+    def __init__(self, kind: str, worker: str, detail: str = ""):
+        self.kind, self.worker, self.detail = kind, worker, detail
+
+
+def _one_line(text: str, limit: int) -> str:
+    line = " ".join((text or "").split())
+    return line if len(line) <= limit else line[: limit - 1].rstrip() + "…"
+
+
+def report_events(reports: list, seen: dict, kinds, names: Optional[dict] = None) -> list:
+    """Diff AO worker reports against ``seen`` ({(id, state): ts}); new
+    (id, state) pairs relay, repeatCount churn on the same state never does.
+    ``seen`` is mutated even for dropped kinds so a later filter change cannot
+    resurrect old events."""
+    now = time.monotonic()
+    events = []
+    for rpt in reports:
+        if not isinstance(rpt, dict):
+            continue
+        state = rpt.get("state")
+        rid = rpt.get("id")
+        if state not in RELAY_REPORT_STATES or not rid:
+            continue
+        key = (rid, state)
+        is_new = key not in seen
+        seen[key] = now
+        if not is_new:
+            continue
+        kind = f"report_{state}"
+        if kind not in kinds:
+            continue
+        sid = rpt.get("sessionId") or ""
+        worker = (names or {}).get(sid) or sid or "?"
+        events.append(RelayEvent(kind, worker, str(rpt.get("note") or "")))
+    for key in [k for k, ts in seen.items() if now - ts > RELAY_SEEN_TTL_SECONDS]:
+        del seen[key]
+    return events
+
+
+def session_events(sessions: list, prev_status: dict, kinds) -> list:
+    """Diff AO session status against ``prev_status`` ({id: status}); only
+    working -> idle/exited/terminated transitions relay, and the first poll
+    records the baseline silently (the caller decides that by pre-seeding
+    ``prev_status`` — an empty dict means baseline-on-next-poll here)."""
+    events = []
+    live_ids = set()
+    for sess in sessions:
+        if not isinstance(sess, dict):
+            continue
+        sid = sess.get("id")
+        if not sid:
+            continue
+        live_ids.add(sid)
+        status = "terminated" if sess.get("isTerminated") else (sess.get("status") or "")
+        previous = prev_status.get(sid)
+        prev_status[sid] = status
+        kind = RELAY_SESSION_STATUSES.get(status)
+        if kind is None or kind not in kinds or previous != RELAY_SESSION_FROM:
+            continue
+        events.append(RelayEvent(kind, str(sess.get("displayName") or sid), ""))
+    for gone in [sid for sid in prev_status if sid not in live_ids]:
+        del prev_status[gone]
+    return events
+
+
+def format_relay_event(ev: RelayEvent) -> str:
+    if ev.kind.startswith("report_"):
+        state = ev.kind[len("report_"):]
+        emoji = REPORT_EMOJI.get(state, "•")
+        detail = _one_line(ev.detail, RELAY_NOTE_LIMIT)
+        label = "needs input" if state == "needs_input" else state
+        return f"{emoji} AO {ev.worker} — report {label}: {detail}" if detail \
+            else f"{emoji} AO {ev.worker} — report {label}"
+    emoji = SESSION_EMOJI.get(ev.kind, "•")
+    what = {"session_idle": "is idle", "session_exited": "exited",
+            "session_terminated": "was terminated"}[ev.kind]
+    return f"{emoji} AO {ev.worker} {what} (was working)"
+
+
+class RelayBatcher:
+    """Collect one-line events; flush as ONE message after a debounce window
+    or when the line cap is hit, so a burst of milestones costs one turn."""
+
+    def __init__(self, debounce_s: float = RELAY_DEBOUNCE_SECONDS,
+                 max_lines: int = RELAY_BATCH_MAX_LINES):
+        self.debounce_s, self.max_lines = debounce_s, max_lines
+        self._lines: list = []
+        self._first_add: Optional[float] = None
+
+    def add(self, line: str) -> Optional[str]:
+        if self._first_add is None:
+            self._first_add = time.monotonic()
+        self._lines.append(line)
+        if len(self._lines) >= self.max_lines:
+            return self.flush()
+        return None
+
+    def due(self, now: Optional[float] = None) -> bool:
+        if not self._lines:
+            return False
+        elapsed = (time.monotonic() if now is None else now) - (self._first_add or 0.0)
+        return elapsed >= self.debounce_s
+
+    def flush(self) -> Optional[str]:
+        if not self._lines:
+            return None
+        text = "\n".join(self._lines)
+        self._lines, self._first_add = [], None
+        return text
+
+    def restore(self, text: str) -> None:
+        """Put a flushed batch back (delivery deferred: a live turn refused the
+        write — keep it for the next tick instead of losing the events)."""
+        for line in reversed(text.split("\n")):
+            self._lines.insert(0, line)
+        if self._lines and self._first_add is None:
+            self._first_add = time.monotonic()
+
+
+class RelaySettings:
+    __slots__ = ("enabled", "session_id", "events")
+
+    def __init__(self, enabled: bool, session_id: str, events: set):
+        self.enabled, self.session_id, self.events = enabled, session_id, events
+
+
+def read_relay_settings() -> RelaySettings:
+    """relay.* plugin settings; defaults are OFF and explicit — the relay
+    never runs, and never picks a session, without the user naming one."""
+    enabled = _config_raw("relay_enabled")
+    events_raw = _config_raw("relay_events")
+    if isinstance(events_raw, (list, tuple)):
+        parsed = {str(item).strip() for item in events_raw if str(item).strip()}
+    else:
+        parsed = {part.strip() for part in str(events_raw or "").split(",")} - {""}
+    events = parsed & set(DEFAULT_RELAY_EVENTS) if parsed else set(DEFAULT_RELAY_EVENTS)
+    return RelaySettings(
+        enabled=str(enabled).strip().lower() in ("1", "true", "yes", "on"),
+        session_id=str(_config_raw("relay_session") or "").strip(),
+        events=events,
+    )
+
+
+def _config_raw(key: str):
+    """Raw ``plugins.entries.ao-bridge.settings.<key>`` (bools/lists survive);
+    None when unset or unreadable. Best-effort like ``_config_setting``."""
+    try:
+        from hermes_cli.config import load_config_readonly  # type: ignore
+    except Exception:  # pragma: no cover - exercised only outside the dashboard server
+        return None
+    try:
+        config = load_config_readonly() or {}
+        return config.get("plugins", {}).get("entries", {}).get(PLUGIN_ID, {}).get("settings", {}).get(key)
+    except Exception:  # pragma: no cover - an unreadable config grants no setting
+        return None
+
+
+def _open_session_db():
+    """SessionDB for the relay's delivery rows; None outside a Hermes install
+    (bare test harnesses) — the relay then fails closed, it never improvises a
+    transport. The DB is Hermes's own store in the process's profile home."""
+    try:
+        from hermes_state import SessionDB  # type: ignore
+    except Exception:
+        return None
+    try:
+        return SessionDB()
+    except Exception:
+        return None
+
+
+def _delegation_id_for(text: str) -> str:
+    """Content-stable dedup key: the same batch delivered twice (a retry after
+    a crash between write and state update) lands on the existing row instead
+    of duplicating the turn."""
+    return "ao-bridge:" + hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+
+
+def deliver_relay_batch(session_id: str, text: str) -> dict:
+    """Inject one batch into the Hermes session as a durable delivery row —
+    the same store path an async delegation completion takes. Retryable
+    failures (a live turn refuses the inter-turn write) return
+    ``{"ok": False, "retryable": True}`` so the worker keeps the batch."""
+    if not session_id:
+        return {"ok": False, "retryable": False, "error": "no relay_session configured"}
+    db = _open_session_db()
+    if db is None:
+        return {"ok": False, "retryable": False, "error": "Hermes session store unavailable"}
+    try:
+        resolver = getattr(db, "resolve_resume_session_id", None)
+        resolved = callable(resolver) and resolver(session_id)
+        row_id = db.append_delegation_delivery(
+            resolved or session_id, text,
+            {"delegation_id": _delegation_id_for(text),
+             "delivery_notice": "ao-bridge relay", "origin": "ao-bridge"},
+        )
+        return {"ok": True, "rowId": row_id, "sessionId": resolved or session_id,
+                "delegationId": _delegation_id_for(text)}
+    except Exception as exc:
+        return {"ok": False, "retryable": True, "error": str(exc)}
+
+
+class RelayWorker:
+    """Backend-owned poll loop: independent of dashboard browser clients,
+    silent through daemon downtime (the next successful tick resumes), and a
+    no-op unless the relay is explicitly enabled AND a session is named."""
+
+    def __init__(self, poll_seconds: float = RELAY_POLL_SECONDS,
+                 debounce_s: float = RELAY_DEBOUNCE_SECONDS):
+        self.poll_seconds, self.debounce_s = poll_seconds, debounce_s
+        self.seen_reports: dict = {}
+        self.prev_status: dict = {}
+        self.baselined = False
+        self.batcher = RelayBatcher(debounce_s=debounce_s)
+        self.last_error = ""
+        self.last_delivery = 0.0
+        self.delivered_count = 0
+        self.pending_text: Optional[str] = None
+
+    def tick(self, ao, sink) -> bool:
+        """One relay tick; False when disabled (the loop then just sleeps)."""
+        settings = read_relay_settings()
+        if not settings.enabled or not settings.session_id:
+            return False
+        self.poll_once(ao, sink, kinds=settings.events,
+                       session_id=settings.session_id)
+        return True
+
+    def poll_once(self, ao, sink, *, kinds=None, session_id="") -> None:
+        kinds = kinds or set(DEFAULT_RELAY_EVENTS)
+        try:
+            projects = ao.projects()
+            names = {}
+            sessions = ao.sessions()
+            for sess in sessions:
+                if isinstance(sess, dict) and sess.get("id"):
+                    names[sess["id"]] = str(sess.get("displayName") or sess["id"])
+            reports = []
+            for project in projects:
+                pid = project.get("id") if isinstance(project, dict) else None
+                if pid:
+                    reports.extend(ao.reports(pid))
+            self.last_error = ""
+        except Exception as exc:  # daemon down: silent, next tick retries
+            self.last_error = str(exc)
+            return
+        events = report_events(reports, self.seen_reports, kinds, names)
+        events += session_events(sessions, self.prev_status, kinds)
+        if not self.baselined:
+            # First successful poll records the daemon's current state only —
+            # enabling the relay must not flood the conversation with history.
+            self.baselined = True
+            events = []
+        for ev in events:
+            self.batcher.add(format_relay_event(ev))
+        self._flush(sink, session_id)
+
+    def _flush(self, sink, session_id: str) -> None:
+        text = self.batcher.flush() if self.batcher.due() else None
+        if not text or not session_id:
+            if text:  # nothing to deliver into yet; keep the batch
+                self.batcher.restore(text)
+            return
+        result = deliver_relay_batch(session_id, text)
+        if result["ok"]:
+            self.last_delivery = time.monotonic()
+            self.delivered_count += 1
+            self.last_error = ""
+            sink(text)
+        elif not result.get("retryable"):
+            # Permanent (store unavailable): drop the batch — retrying forever
+            # would only spin. The /relay status endpoint reports the cause.
+            self.last_error = result.get("error") or "delivery failed"
+        else:
+            # A live turn refused the write: keep the batch for the next tick.
+            self.batcher.restore(text)
+            self.last_error = result.get("error") or "delivery deferred"
+
+
+_relay_worker: Optional[RelayWorker] = None
+_relay_lock = threading.Lock()
+_relay_thread: Optional[threading.Thread] = None
+
+
+def _relay_sink(_text: str) -> None:
+    """Delivery is complete at the store row; nothing further to log at INFO."""
+
+
+def _relay_loop() -> None:
+    worker = _relay_worker
+    while True:
+        disabled = False
+        try:
+            disabled = not worker.tick(client(), _relay_sink)
+        except Exception as exc:  # never let the loop die on one bad tick
+            log.warning("ao-bridge relay tick failed: %s", exc)
+        # Disabled relays idle at half cadence; the daemon being down is just
+        # another failed tick — the loop resumes silently when it is back.
+        time.sleep(worker.poll_seconds * (2 if disabled else 1))
+
+
+def ensure_relay_started() -> RelayWorker:
+    """Start the relay loop once per process; cheap to call from any route."""
+    global _relay_worker, _relay_thread
+    with _relay_lock:
+        if _relay_worker is None:
+            _relay_worker = RelayWorker()
+        if _relay_thread is None or not _relay_thread.is_alive():
+            _relay_thread = threading.Thread(target=_relay_loop, name="ao-bridge-relay",
+                                             daemon=True)
+            _relay_thread.start()
+        return _relay_worker
+
+
+@router.get("/relay")
+def relay_status():
+    """Relay diagnostics for the dashboard / operators: what it watches, where
+    it delivers, and whether the last tick was healthy."""
+    worker = ensure_relay_started()
+    settings = read_relay_settings()
+    return {
+        "ok": True,
+        "enabled": settings.enabled,
+        "session": settings.session_id,
+        "events": sorted(settings.events),
+        "watching": worker.baselined,
+        "delivered": worker.delivered_count,
+        "lastError": worker.last_error,
+    }
+
+
+@router.get("/relay/sessions")
+def relay_session_suggestions():
+    """Recent Hermes sessions of this profile, for picking ``relay_session``.
+    The choice itself stays explicit config — the relay never auto-targets."""
+    db = _open_session_db()
+    if db is None:
+        return {"ok": False, "sessions": [], "error": "Hermes session store unavailable"}
+    try:
+        rows = db.list_sessions_rich(limit=8, order_by_last_active=True, compact_rows=True)
+    except Exception as exc:
+        return {"ok": False, "sessions": [], "error": str(exc)}
+    return {"ok": True, "sessions": [
+        {"id": row.get("id"), "title": row.get("title") or "",
+         "lastActive": str(row.get("last_active") or row.get("lastActivity") or "")}
+        for row in rows if isinstance(row, dict) and row.get("id")
+    ]}
+
