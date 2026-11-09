@@ -2,7 +2,7 @@
  * AO Bridge — Hermes Dashboard Plugin (frontend)
  *
  * Kanban board over the local AO daemon: every AO project's sessions as cards,
- * spawn form, send-message sheet, kill action. Polls the plugin backend at
+ * spawn form, send-message sheet, archive action. Polls the plugin backend at
  * /api/plugins/ao-bridge/ for live refresh.
  *
  * Plain IIFE, no build step. Uses window.__HERMES_PLUGIN_SDK__ for React and
@@ -180,12 +180,12 @@
         card.column !== "archive"
           ? h("button", {
               className: "ao-btn ao-btn-danger", disabled: !!busy,
-              title: "Kill this AO session",
+              title: "Archive this AO session",
               onClick: function (e) {
                 e.stopPropagation();
-                if (window.confirm("Kill AO session \"" + card.displayName + "\"? This terminates the agent session.")) action("kill", e);
+                if (window.confirm("Archive AO session \"" + card.displayName + "\"? This terminates the agent session.")) action("kill", e);
               },
-            }, busy === "kill" ? "Killing…" : "Kill")
+            }, busy === "kill" ? "Archiving…" : "Archive")
           : null
       )
     );

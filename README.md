@@ -12,7 +12,7 @@ board refresh itself.
 | Capability | Detail | Risk |
 |---|---|---|
 | **Spawns agent sessions** | `POST /api/plugins/ao-bridge/spawn` creates a real AO worker session (an AI coding agent) in the selected project with the harness you pick. | **Heavy.** The spawned agent executes tasks in that project's workspace. |
-| **Kills agent sessions** | The card **Kill** action calls the AO daemon's kill endpoint, terminating a running agent session. | **Heavy.** Unsaved work in that session's workspace is lost. |
+| **Archives agent sessions** | The card **Archive** action calls the AO daemon's kill endpoint, terminating a running agent session (AO marks it Archived). | **Heavy.** Unsaved work in that session's workspace is lost. |
 | **Sends messages to agents** | The **Message** action posts a user-authored message into a running AO session; the agent treats it as user input and acts on it. | Medium. Drives a live agent. |
 | **Local-only network calls** | The backend talks ONLY to the local AO daemon REST API (`http://127.0.0.1:3001` by default, loopback). No secrets are read, no external requests are made. | Low. Local loopback only. |
 | **Reads AO state** | `GET /board` reads the AO daemon's project and session lists and reduces them to board cards. | Low. Read-only. |
@@ -86,7 +86,7 @@ Message sheet — send a user-authored message to a running session:
 - **Spawn form**: pick a registered AO project, harness, session name, and
   initial prompt → creates the worker via the AO daemon.
 - **Message sheet**: send a user-authored message to any live session.
-- **Kill action** with confirmation on any non-archived session.
+- **Archive action** with confirmation on any non-archived session.
 
 ## Install
 
@@ -136,7 +136,7 @@ it's the AO vendor's own tool plugin. ao-bridge is the layer it doesn't have:
 the **visual board**. Where hermes-ao turns the conversation into the only
 interface (text in, text out), ao-bridge gives the human a live window — every
 AO project's sessions on one Kanban board with real-time state, PR links, and
-one-click spawn/send/kill — served from the dashboard over the daemon's REST
+one-click spawn/send/archive — served from the dashboard over the daemon's REST
 API. The two are complementary (chat tools for the agent, board for the
 human), and ao-bridge deliberately talks to the daemon's loopback REST instead
 of shelling the CLI, so it works wherever the dashboard works.
