@@ -525,7 +525,13 @@ def column_for(session: dict) -> str:
       kanbanColumn: archive, building, validating, ready, needs_review
       provisionState: ready, provisioning, failed
     """
-    if session.get("isTerminated") or session.get("status") == "terminated":
+    if session.get("isTerminated") or session.get("status") == "terminated" \
+            or session.get("kanbanColumn") == "archive":
+        # AO desktop's archive predicate (function He in its board adapter,
+        # extracted app.asar, v0.8.3): kanbanColumn "archive" | isTerminated |
+        # status "terminated". The daemon's list rows carry no explicit
+        # archive marker — a row parked in the daemon's own archive column is
+        # the marker, so it joins termination in the strip.
         return "archive"
     if session.get("status") == "merged":
         return "done"
@@ -573,9 +579,14 @@ def state_for(session: dict) -> str:
     ``exited`` is its own state, NOT "archived" (v0.8.2): an exited session
     keeps its AO board column and is resumable — labeling it "Archived" made
     live workers read as dead (the v0.8.1 board bug). "Archived" is reserved
-    for termination, which is what the archive strip + Restore are for.
+    for the desktop archive predicate — termination, or a row the daemon
+    itself parked in its archive column — which is what the archive strip +
+    Restore are for.
     """
-    if session.get("isTerminated") or session.get("status") == "terminated":
+    if session.get("isTerminated") or session.get("status") == "terminated" \
+            or session.get("kanbanColumn") == "archive":
+        # The desktop archive predicate (see column_for): daemon-parked
+        # archive-column rows are archived too, termination or not.
         return "archived"
     if session.get("status") == "working":
         return "working"

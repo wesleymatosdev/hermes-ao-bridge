@@ -496,20 +496,39 @@ daemon, including the node-run JS-block contracts).
 
 **Lane 2 — browser E2E (`tests/e2e/`).** The unit suite tests pieces; four
 shipped bugs (v0.8.0–v0.8.3) stayed green through all of it because nothing
-asserted *rendered behavior*. This lane renders the REAL frontend
-(`dashboard/dist/index.js` + `dist/style.css`) in a real headless Chrome
-(CDP over python `websockets` — no npm, no network) against the REAL
+asserted *rendered behavior*. This lane is a **parity gate built around a
+minimal reference daemon** (`tests/e2e/reference_board.py`): a canonical set
+of daemon rows covering every board edge (working / idle / exited /
+awaiting-PR / review / CI-failed / queued / ready / daemon-archive-column /
+terminated workers, plus live and terminated orchestrators), and a PURE model
+that computes the board those rows imply. The REAL frontend
+(`dashboard/dist/index.js` + `dist/style.css`) is rendered in a real headless
+Chrome (CDP over python `websockets` — no npm, no network) against the REAL
 `plugin_api.py` router pointed at the fixture daemon
-(`tests/fake_ao_server.py`), and asserts what a user sees — one contract per
-shipped bug:
+(`tests/fake_ao_server.py`), and the DOM is asserted 1:1 against the model:
+same card names per column, same state chips, same archive membership, same
+orchestrator strip — in BOTH toggle views — plus theme painting and picker
+persistence.
 
-| # | Contract (test class) | Catches |
-|---|---|---|
-| 1 | Every picker theme paints cards — computed card surface present, text contrast sane — **including with the fragile color functions made unparseable** (`style.css?break=1`, the exact v0.8.0 reproduction) | v0.8.1 oklch/color-mix token poisoning |
-| 2 | Switching **Active only** off changes column card counts | v0.8.2 dropped-toggle no-op |
-| 3 | Exited sessions never wear the **Archived** chip; the Archive strip holds only daemon-archived sessions | v0.8.2/v0.8.3 state honesty |
-| 4 | Orchestrators render on the board (strip visible with Active only on) | v0.8.3 vanishing orchestrators |
-| 5 | Every theme swatch applies its theme and persists across reload | picker/persistence regressions |
+Archive ground truth is AO desktop's own predicate, extracted from the
+app.asar in the v0.8.3 investigation (`SessionsBoard-THqlEmxF.js` function
+`He` + `useCloudSessionEvents` function `b`):
+
+    kanbanColumn === "archive" || isTerminated === true || status === "terminated"
+
+The daemon's sessions REST payload carries NO explicit archive marker, so
+that predicate over the list rows IS the desktop truth — over ALL sessions,
+orchestrators included. Encoding it as the parity expectation caught a live
+divergence: the bridge's `column_for` implemented only the two termination
+clauses, so an alive row the daemon parked in its own archive column rendered
+as a live card instead of archive history. Fixed in `plugin_api.py`
+(`column_for` + `state_for`) and the frontend `deriveState` fallback, with
+unit contracts in `tests/test_board_map.py` / `tests/test_v051.py`; the E2E
+gate is RED on any tree without the fix and GREEN on this one.
+
+Because themes are enumerated from the live picker DOM and every board
+expectation is computed from the daemon rows, theme-set changes and board
+semantics changes surface as parity failures, not stale test edits.
 
 Requirements and knobs:
 
@@ -525,10 +544,13 @@ Requirements and knobs:
   against pre-fix code (the v0.8.x RED/GREEN receipts were produced exactly
   this way).
 
-**RED/GREEN proof receipts (2026-11-09):** run against pre-fix worktrees —
-v0.8.0 RED on contracts 1–4, v0.8.1 RED on 2–4, v0.8.2 RED on 4, main GREEN
-on all. Nothing writes outside loopback + throwaway temp dirs: the real AO
-daemon and the real Hermes home are never touched.
+**RED/GREEN proof receipts (2026-11-09):** E2E run against detached pre-fix
+worktrees via `AO_BRIDGE_E2E_PLUGIN_ROOT` — v0.8.0 RED (parity columns +
+archive + orchestrators, engine-proof theme), v0.8.1 RED (parity), v0.8.2 RED
+(parity), bare v0.8.4 main RED on exactly the archive-predicate divergence
+(`arch-col-worker` in Running instead of the strip), this branch GREEN on all
+5 contracts. Nothing writes outside loopback + throwaway temp dirs: the real
+AO daemon and the real Hermes home are never touched.
 
 The E2E fixture never talks to a live AO daemon, and the harness server binds
 loopback only. React 18.3.1 UMD builds for the host page are vendored and

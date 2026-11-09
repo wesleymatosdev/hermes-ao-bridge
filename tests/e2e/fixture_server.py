@@ -57,44 +57,19 @@ def _recent_iso(minutes_ago: int = 5) -> str:
 
 
 def build_board_fixture(fake_ao_cls):
-    """Populate a FakeAO with every card population the contracts reason about.
-
-    One session per board state, all recently active so the default 24h
-    recency window keeps them:
-      working-worker    live turn            -> Running column, Working chip
-      idle-worker       alive, no turn       -> Running column, Idle chip
-      exited-worker     agent process gone   -> Running column, Exited chip
-                                               (NOT Archived — contract 3)
-      awaiting-worker   Awaiting PR          -> Done column, Awaiting PR chip
-      terminated-worker isTerminated         -> Archive strip
-      orch-live         kind=orchestrator    -> orchestrator strip
-      orch-dead         terminated orchestr. -> Archive strip (v0.8.3 semantics)
-    """
-    from tests.fake_ao_server import make_session
+    """Populate a FakeAO with the minimal reference daemon's canonical rows
+    (tests/e2e/reference_board.py — the source of truth this gate asserts
+    parity against): one worker per board edge (working / idle / exited /
+    awaiting PR / review / CI-failed / queued / ready / daemon-archive-column
+    / terminated) plus live-working, live-idle and terminated orchestrators.
+    All recently active so the default 24h recency window keeps them."""
+    from tests.e2e.reference_board import canonical_rows
 
     ao = fake_ao_cls()
     ao.project_rows = [{"id": "proj-demo", "name": "demo-project",
                         "path": "/tmp/ao-bridge-e2e/demo"}]
-
-    def add(session_id, name, **kw):
-        row = make_session(session_id, project_id="proj-demo",
-                           display_name=name, created_at=_recent_iso(), **kw)
+    for row in canonical_rows(_recent_iso()):
         ao.add_session(row)
-        return row
-
-    add("w-working", "working-worker", status="working")
-    idle = add("w-idle", "idle-worker", status="idle")
-    idle["activity"]["state"] = "idle"
-    add("w-exited", "exited-worker", status="exited")
-    add("w-awaiting", "awaiting-worker", status="idle",
-        display_status="Awaiting PR")
-    add("w-terminated", "terminated-worker", status="terminated", terminated=True)
-
-    orch = add("o-live", "orch-live", status="idle")
-    orch["kind"] = "orchestrator"
-    orch["activity"]["state"] = "idle"
-    orch_dead = add("o-dead", "orch-dead", status="terminated", terminated=True)
-    orch_dead["kind"] = "orchestrator"
     return ao
 
 

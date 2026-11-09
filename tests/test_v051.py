@@ -57,6 +57,12 @@ class StateEnumTest(unittest.TestCase):
     def test_terminated_is_archived(self):
         self.assertEqual(state_for(session(status="idle", terminated=True)), "archived")
 
+    def test_daemon_archive_column_is_archived_even_when_alive(self):
+        # Lockstep with column_for / the desktop predicate (asar function He):
+        # a daemon-archive-column row is archived, alive or not.
+        self.assertEqual(state_for(session(status="idle",
+                                           kanban_column="archive")), "archived")
+
     def test_status_terminated_beats_awaiting_pr(self):
         # displayStatus can lag the real state; termination is definitive.
         s = session(status="terminated", display_status="Awaiting PR")
@@ -104,10 +110,13 @@ class FrontendStateContractTest(unittest.TestCase):
         self.assertIn('exited: "Exited"', js)
         # deriveState must map exited → exited (never "archived")
         self.assertRegex(js, r'if \(st === "exited"\) return "exited";')
+        # terminated → archived; the desktop archive predicate adds the
+        # daemon-archive-column clause (a row parked there by the daemon is
+        # archived — alive or not).
         self.assertRegex(
-            js, r'if \(st === "terminated"\) return "archived";')
+            js, r'if \(st === "terminated"( \|\| card\.column === "archive")?\) return "archived";')
         # and terminated must be checked BEFORE exited in deriveState
-        term = js.index('if (st === "terminated") return "archived";')
+        term = js.index('return "archived";')
         exit_ = js.index('if (st === "exited") return "exited";')
         self.assertLess(term, exit_)
 

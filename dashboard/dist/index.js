@@ -202,9 +202,10 @@
   function deriveState(card) {
     // Mirrors backend state_for: "exited" is its own honest state — an
     // exited session is resumable, not archived (v0.8.2; "Archived" here
-    // made live workers read as dead).
+    // made live workers read as dead). A daemon-archive-column row is
+    // archived too — the desktop predicate's kanbanColumn clause.
     const st = (card.status || "").toLowerCase();
-    if (st === "terminated") return "archived";
+    if (st === "terminated" || card.column === "archive") return "archived";
     if (st === "exited") return "exited";
     if (st === "working") return "working";
     if ((card.displayStatus || "").toLowerCase().indexOf("awaiting pr") !== -1) return "awaiting_pr";

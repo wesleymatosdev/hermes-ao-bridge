@@ -21,6 +21,13 @@ class ColumnMappingTest(unittest.TestCase):
         s = make_session("s1", status="terminated", terminated=True)
         self.assertEqual(column_for(s), "archive")
 
+    def test_daemon_archive_column_is_archive_even_when_alive(self):
+        # AO desktop's archive predicate (asar function He, v0.8.3): a row the
+        # daemon parked in its own archive column is archived — the list rows
+        # carry no other marker. Alive or not, it never renders as a card.
+        s = make_session("s1", status="idle", kanban_column="archive")
+        self.assertEqual(column_for(s), "archive")
+
     def test_merged_is_done(self):
         self.assertEqual(column_for(make_session("s1", status="merged")), "done")
 
