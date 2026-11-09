@@ -63,14 +63,22 @@ Message sheet — send a user-authored message to a running session:
   filtering happens in the browser over the already-fetched board — changing a
   filter makes no daemon call, and the filtered view still updates in place
   from live `/events` pushes.
+- **Per-harness icons**: cards and the spawn form show the same icon per
+  harness that the AO desktop app shows (33 inline SVGs from AO's renderer
+  bundle, plus bundled PNG/SVG assets for hermes, memcode, unreal-agent, agy
+  and codewhale), mapped via `dashboard/assets/harness-icons.json` with a
+  fallback icon. Native `<select>` options can't render images, so the spawn
+  form shows the selected harness's icon live beside the selector.
 - **Card detail sheet**: click a card for status, project, harness, branch,
   age, the transcript tail (bounded to 200 messages), and the canonical
-  `ao://sessions/…` link — read-only. Transcript turns are classified into
-  three message classes from the daemon's `authoredByUser` wire flag:
-  **Worker** (assistant turns — the harness's own output), **End user**
-  (`authoredByUser: true`), and **Orchestrator / other agent** (everything
-  else), each with its own color, a class label on every turn, and a
-  click-to-hide filter chip per class.
+  `ao://sessions/…` link — read-only. The transcript reads as an
+  iMessage-style chat: rounded bubbles aligned by sender class —
+  **Worker** turns on the left (green), **End user** messages on the right
+  (purple/cyan gradient), **Orchestrator / other agent** on the left with a
+  dashed amber bubble — each with a small class label and its own
+  click-to-hide filter chip. Classification comes from the daemon's
+  `authoredByUser` wire flag (Worker = assistant turns, End user =
+  `authoredByUser: true`, everything else = Orchestrator / other agent).
 - **Spawn form**: pick a registered AO project, harness, session name, and
   initial prompt → creates the worker via the AO daemon.
 - **Message sheet**: send a user-authored message to any live session.
@@ -158,6 +166,7 @@ hermes-ao-bridge/
 └── dashboard/
     ├── manifest.json         # tab (/ao-bridge, after:skills) + api + assets
     ├── plugin_api.py         # FastAPI APIRouter, mounted at /api/plugins/ao-bridge/
+    ├── assets/               # per-harness icons + map (served to the browser)
     └── dist/
         ├── index.js          # plain-IIFE React frontend (HERMES_PLUGIN_SDK)
         └── style.css         # nebula/galaxy dark theme, scoped under .ao-bridge

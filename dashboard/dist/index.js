@@ -20,6 +20,38 @@
 
   const API = "/api/plugins/ao-bridge";
   const POLL_MS = 5000;
+  // Browser assets are served from the plugin's dashboard/ dir by the host
+  // (dashboard-plugins static route). The SDK exposes no asset-base helper,
+  // so the fixed plugin id doubles as the URL base.
+  const ASSET_BASE = "/dashboard-plugins/ao-bridge";
+
+  // Per-harness icon map (assets/harness-icons.json, copied from the AO
+  // desktop app). Fetched once, cached at module scope.
+  let iconMapPromise = null;
+  function loadIconMap() {
+    if (!iconMapPromise) {
+      iconMapPromise = fetch(ASSET_BASE + "/assets/harness-icons.json")
+        .then(function (r) { return r.ok ? r.json() : {}; })
+        .catch(function () { return {}; });
+    }
+    return iconMapPromise;
+  }
+
+  function useHarnessIcons() {
+    const [map, setMap] = useState(null);
+    useEffect(function () {
+      let alive = true;
+      loadIconMap().then(function (m) { if (alive) setMap(m || {}); });
+      return function () { alive = false; };
+    }, []);
+    return map;
+  }
+
+  function harnessIconSrc(map, harness) {
+    if (!map || !harness) return null;
+    const v = map[harness] || map._fallback;
+    return v ? ASSET_BASE + "/" + v : null;
+  }
 
   // Recency buckets for the board filter; ms=0 means "no time bound".
   const RECENCY_OPTIONS = [
@@ -84,7 +116,10 @@
 
   function HarnessChip(props) {
     if (!props.harness) return null;
-    return h("span", { className: "ao-chip ao-chip-harness" }, props.harness);
+    const src = harnessIconSrc(props.iconMap, props.harness);
+    return h("span", { className: "ao-chip ao-chip-harness", title: props.harness },
+      src ? h("img", { className: "ao-chip-icon", src: src, alt: "", loading: "lazy" }) : null,
+      props.harness);
   }
 
   function PrLinks(props) {
@@ -129,7 +164,7 @@
       ),
       h("div", { className: "ao-card-name", title: card.displayName }, card.displayName),
       h("div", { className: "ao-card-meta" },
-        h(HarnessChip, { harness: card.harness }),
+        h(HarnessChip, { harness: card.harness, iconMap: props.iconMap }),
         h(StatusChip, { displayStatus: card.displayStatus, status: card.status }),
         card.branch ? h("span", { className: "ao-chip ao-chip-branch", title: card.branch }, card.branch) : null
       ),
@@ -169,7 +204,7 @@
             cards.length === 0
               ? h("div", { className: "ao-column-empty" }, "No sessions")
               : cards.map(function (c) {
-                  return h(Card, { key: c.id, card: c, onChanged: props.onChanged, onSend: props.onSend, onOpen: props.onOpen });
+                  return h(Card, { key: c.id, card: c, iconMap: props.iconMap, onChanged: props.onChanged, onSend: props.onSend, onOpen: props.onOpen });
                 })
           )
     );
@@ -217,11 +252,17 @@
         ),
         h("label", { className: "ao-field" },
           h("span", { className: "ao-field-label" }, "Harness"),
-          h("select", { className: "ao-input", value: harness,
-                        onChange: function (e) { setHarness(e.target.value); } },
-            (props.harnesses || ["hermes"]).map(function (x) {
-              return h("option", { key: x, value: x }, x);
-            })
+          h("div", { className: "ao-harness-select" },
+            (function () {
+              const src = harnessIconSrc(props.iconMap, harness);
+              return src ? h("img", { className: "ao-harness-icon", src: src, alt: harness, title: harness }) : null;
+            })(),
+            h("select", { className: "ao-input", value: harness,
+                          onChange: function (e) { setHarness(e.target.value); } },
+              (props.harnesses || ["hermes"]).map(function (x) {
+                return h("option", { key: x, value: x }, x);
+              })
+            )
           )
         ),
         h("label", { className: "ao-field" },
@@ -289,9 +330,9 @@
   //   user         — authoredByUser=true (End user)
   //   orchestrator — everything else non-assistant (Orchestrator / other agent)
   const MSG_CLASSES = {
-    worker: { label: "Worker", short: "Worker", title: "The harness's own output (assistant turns)" },
-    user: { label: "End user", short: "End user", title: "Authored by the session's user (authoredByUser)" },
-    orchestrator: { label: "Orchestrator / other agent", short: "Orchestrator", title: "Not user-authored and not an assistant turn" },
+    worker: { label: "Worker", title: "The harness's own output (assistant turns)" },
+    user: { label: "End user", title: "Authored by the session's user (authoredByUser)" },
+    orchestrator: { label: "Orchestrator / other agent", title: "Not user-authored and not an assistant turn" },
   };
 
   function messageClass(m) {
@@ -353,16 +394,18 @@
                 onClick: function () { toggleClass(id); },
               }, (off ? "\u25CB " : "\u25CF ") + MSG_CLASSES[id].label);
             })),
-          (detail.transcript || []).filter(function (m) { return !hiddenClasses[messageClass(m)]; }).length === 0
-            ? h("div", { className: "ao-column-empty" }, "No messages in the shown classes")
-            : (detail.transcript || [])
-                .filter(function (m) { return !hiddenClasses[messageClass(m)]; })
-                .map(function (m, i) {
-                  const cls = messageClass(m);
-                  return h("div", { key: i, className: "ao-transcript-row ao-msg-" + cls },
-                    h("span", { className: "ao-transcript-role", title: MSG_CLASSES[cls].label }, MSG_CLASSES[cls].short),
-                    h("span", { className: "ao-transcript-text" }, m.text));
-                })
+          h("div", { className: "ao-chat" },
+            (detail.transcript || []).filter(function (m) { return !hiddenClasses[messageClass(m)]; }).length === 0
+              ? h("div", { className: "ao-column-empty" }, "No messages in the shown classes")
+              : (detail.transcript || [])
+                  .filter(function (m) { return !hiddenClasses[messageClass(m)]; })
+                  .map(function (m, i) {
+                    const cls = messageClass(m);
+                    return h("div", { key: i, className: "ao-chat-row ao-chat-" + cls },
+                      h("div", { className: "ao-chat-col" },
+                        h("span", { className: "ao-chat-sender" }, MSG_CLASSES[cls].label),
+                        h("div", { className: "ao-bubble" }, m.text)));
+                  }))
         ) : null,
         h("div", { className: "ao-sheet-actions" },
           h("button", { type: "button", className: "ao-btn ao-btn-ghost", onClick: props.onClose }, "Close")
@@ -400,6 +443,7 @@
     });
     const timerRef = useRef(null);
     const wsRef = useRef(null);
+    const iconMap = useHarnessIcons();
 
     const refresh = useCallback(function () {
       return authedFetchJson(API + "/board")
@@ -610,6 +654,7 @@
             columns.map(function (col) {
               return h(Column, {
                 key: col.id, id: col.id, label: col.label, cards: col.cards,
+                iconMap: iconMap,
                 collapsed: col.id === "archive" && collapsed,
                 onToggle: col.id === "archive" ? toggleArchive : undefined,
                 onChanged: refresh, onSend: setSendTarget, onOpen: setDetailTarget,
@@ -619,6 +664,7 @@
       spawnOpen
         ? h(SpawnForm, {
             projects: (data && data.projects) || [], harnesses: (data && data.harnesses) || ["hermes"],
+            iconMap: iconMap,
             onClose: function () { setSpawnOpen(false); },
             onChanged: function (session) {
               setSpawnOpen(false);

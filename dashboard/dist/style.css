@@ -440,33 +440,68 @@
   padding-top: 10px;
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  max-height: 320px;
+  gap: 8px;
+  max-height: 420px;
   overflow-y: auto;
 }
 
-.ao-transcript-row {
+/* iMessage-style chat: bubbles aligned by sender class */
+.ao-chat {
   display: flex;
+  flex-direction: column;
   gap: 8px;
-  font-size: 12px;
-  line-height: 1.45;
-  align-items: baseline;
+  padding: 2px 2px 6px;
 }
 
-.ao-transcript-role {
-  flex-shrink: 0;
-  width: 96px;
-  font-size: 10px;
+.ao-chat-row { display: flex; }
+.ao-chat-row.ao-chat-user { justify-content: flex-end; }
+
+.ao-chat-col {
+  display: flex;
+  flex-direction: column;
+  max-width: 82%;
+  min-width: 0;
+}
+.ao-chat-user .ao-chat-col { align-items: flex-end; }
+
+.ao-chat-sender {
+  font-size: 9.5px;
   text-transform: uppercase;
-  letter-spacing: 0.05em;
+  letter-spacing: 0.06em;
+  margin: 0 4px 2px;
   color: var(--ao-text-dim);
 }
+.ao-chat-worker .ao-chat-sender { color: var(--ao-good); }
+.ao-chat-orchestrator .ao-chat-sender { color: var(--ao-warn); }
+.ao-chat-user .ao-chat-sender { color: var(--ao-accent-2); }
 
-/* message classes: Worker (harness output) / End user / Orchestrator */
-.ao-msg-worker .ao-transcript-role { color: var(--ao-good); }
-.ao-msg-user .ao-transcript-role { color: var(--ao-accent-2); }
-.ao-msg-orchestrator .ao-transcript-role { color: var(--ao-warn); }
+.ao-bubble {
+  padding: 7px 11px;
+  border-radius: 14px;
+  border-bottom-left-radius: 4px;
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: var(--ao-text);
+  white-space: pre-wrap;
+  word-break: break-word;
+  min-width: 0;
+}
+.ao-chat-user .ao-bubble {
+  border-bottom-left-radius: 14px;
+  border-bottom-right-radius: 4px;
+  background: linear-gradient(135deg, rgba(124, 108, 255, 0.35), rgba(56, 189, 248, 0.26));
+  border: 1px solid rgba(124, 108, 255, 0.5);
+}
+.ao-chat-worker .ao-bubble {
+  background: rgba(52, 211, 153, 0.09);
+  border: 1px solid rgba(52, 211, 153, 0.3);
+}
+.ao-chat-orchestrator .ao-bubble {
+  background: rgba(251, 191, 36, 0.06);
+  border: 1px dashed rgba(251, 191, 36, 0.45);
+}
 
+/* per-class filter chips over the chat */
 .ao-class-filters {
   display: flex;
   gap: 6px;
@@ -483,15 +518,29 @@
 .ao-class-user { color: var(--ao-accent-2); border-color: rgba(56, 189, 248, 0.4); }
 .ao-class-orchestrator { color: var(--ao-warn); border-color: rgba(251, 191, 36, 0.4); }
 
-.ao-transcript-text {
-  color: var(--ao-text);
-  white-space: pre-wrap;
-  word-break: break-word;
-  max-height: 88px;
-  overflow: hidden;
-  -webkit-line-clamp: 4;
-  display: -webkit-box;
-  -webkit-box-orient: vertical;
+/* per-harness icons (cards + spawn form) */
+.ao-chip-harness {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.ao-chip-icon {
+  width: 13px;
+  height: 13px;
+  border-radius: 3px;
+  flex-shrink: 0;
+}
+.ao-harness-select {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.ao-harness-select .ao-input { flex: 1; }
+.ao-harness-icon {
+  width: 20px;
+  height: 20px;
+  border-radius: 5px;
+  flex-shrink: 0;
 }
 
 /* narrow dashboards: columns scroll horizontally */
