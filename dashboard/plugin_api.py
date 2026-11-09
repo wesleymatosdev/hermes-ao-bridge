@@ -45,6 +45,9 @@ AO wire contract (verified against the live daemon and the AO backend source):
                                                   rssBytes, cpuPercent, ...}]}
 - POST /api/v1/sessions/{id}/pin               pin (DELETE unpins)
 - PATCH /api/v1/sessions/{id}                  {"displayName"} (1..100 chars)
+- WS   /mux                                    terminal multiplexer (terminal view;
+                                               ch-tagged JSON frames, PTY bytes
+                                               base64; see the terminal section below)
 """
 
 from __future__ import annotations
@@ -281,6 +284,28 @@ def open_in_ao_links() -> bool:
     if env:
         return env in _TRUTHY
     return False
+
+
+def terminal_view_enabled() -> bool:
+    """Live terminal view on the card detail sheet (default ON — it is
+    local-only and drives your own workers).
+
+    Reads the raw settings dict rather than ``_config_setting``: that helper
+    stringifies and treats any falsy value as "unset", which would make an
+    explicit ``terminal_view: false`` indistinguishable from the default and
+    impossible to turn OFF. Env override mirrors the other flags.
+    """
+    try:
+        settings = (_load_hermes_config().get("plugins", {}).get("entries", {})
+                    .get(PLUGIN_ID, {}).get("settings", {}))
+        if "terminal_view" in settings:
+            return bool(settings["terminal_view"])
+    except Exception:  # pragma: no cover - an unreadable config grants no setting
+        pass
+    env = (os.environ.get("AO_BRIDGE_TERMINAL_VIEW") or "").strip().lower()
+    if env:
+        return env in _TRUTHY
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -1312,7 +1337,19 @@ def detail_payload(ao: AOClient, session_id: str) -> dict:
     route maps it, the WS loop handles it.
     """
     sess = ao.get_session(session_id)
-    conv = ao.conversation(session_id)
+    try:
+        conv = ao.conversation(session_id)
+    except AOApiError as err:
+        # TUI-mode sessions (the ones WITH a terminal) answer 409 on the
+        # conversation surface — they have no chat. Degrade to metadata +
+        # terminal view instead of failing the whole sheet; daemon-down and
+        # vanished sessions still raise.
+        if err.is_transient or err.is_gone:
+            raise
+        conv = {}
+        note = err.message
+    else:
+        note = ""
     messages = conv.get("messages") or []
     if not isinstance(messages, list):
         messages = []
@@ -1351,6 +1388,13 @@ def detail_payload(ao: AOClient, session_id: str) -> dict:
             "updatedAt": sess.get("updatedAt") or "",
             "activityState": activity.get("state") or "",
             "aoLink": ao_deep_link(project_id, session_id),
+            # The AO daemon's PTY handle for this session (verified on the live
+            # daemon: "ptyhost-v1:<sessionId>" when a pane exists, absent when
+            # the harness runs headless). The Terminal tab keys off it.
+            "terminalHandleId": sess.get("terminalHandleId") or "",
+            # Feature gate resolved server-side so a disabled terminal_view
+            # hides the tab without a dead route to hit.
+            "terminalView": terminal_view_enabled(),
         },
         # AO's inspector carries a usage section (cost · tokens) — the same
         # report-line format the cards use.
@@ -1390,6 +1434,9 @@ def detail_payload(ao: AOClient, session_id: str) -> dict:
         ],
         "transcriptTotal": len(messages),
         "transcriptTruncated": len(messages) > len(tail),
+        # Non-empty when the conversation surface refused (TUI-mode session):
+        # the sheet renders this instead of an empty transcript.
+        "conversationNote": note,
         "activities": tools["activities"],
         "activitiesTotal": tools["activitiesTotal"],
         "plan": latest_plan(conv),
@@ -1409,6 +1456,145 @@ def detail(session_id: str):
         return detail_payload(ao, session_id)
     except AOApiError as err:
         _raise_mapped(err)
+
+
+# ---------------------------------------------------------------------------
+# Terminal view: WS proxy from the card detail sheet to the AO daemon's
+# terminal multiplexer (v0.6.0)
+#
+# The daemon multiplexes live PTY panes at GET /mux (backend/internal/terminal/
+# in the AO source; ground-truthed against the live daemon and the desktop
+# frontend's lib/terminal-mux.ts): one JSON-framed socket, channel-tagged
+# ("ch"). "terminal" frames carry per-pane bytes base64-encoded (PTY output is
+# arbitrary bytes), keyed by the session's opaque runtime handle — the session
+# row's "terminalHandleId" (e.g. "ptyhost-v1:<id>", present only when the
+# harness runs a pane). open{id,cols,rows} → the daemon answers opened{id}
+# then streams a full repaint plus live output as data{id,data};
+# resize{id,cols,rows} negotiates the shared grid (the daemon pushes its
+# authoritative grid back with the same frame type); data{id,data} delivers
+# keystrokes; close{id} detaches. Input is lease-gated server-side: while an
+# exclusive session operation (agent switch, resume, kill) holds the input
+# lease, the daemon answers keystrokes with error{id,error} but keeps the
+# pane viewable — the mux does NOT arbitrate typing between simultaneous
+# viewers, so there is no cross-client "input lock" to render.
+#
+# This route authenticates like /events, resolves the session's handle over
+# the REST surface, and pipes frames verbatim — the browser speaks the daemon
+# protocol directly. The proxy adds exactly one rule: terminal frames naming
+# any other id than this session's handle are refused, so one stream can
+# reach exactly one worker's pane.
+# ---------------------------------------------------------------------------
+
+# Mirrors the daemon's terminalMuxReadLimit: a keystroke/paste frame larger
+# than this is refused client-side instead of getting the connection torn
+# down by the daemon's read limit.
+TERMINAL_FRAME_MAX_BYTES = 1 << 20
+
+
+def _terminal_error_frame(error: str, terminal_id: str = "") -> dict:
+    frame = {"ch": "terminal", "type": "error", "error": error}
+    if terminal_id:
+        frame["id"] = terminal_id
+    return frame
+
+
+def _mux_ws_url(base_url: str) -> str:
+    """ws(s)://…/mux from the daemon's REST base (the mux is mounted at the
+    router root, not under /api/v1)."""
+    if base_url.startswith("https://"):
+        return "wss://" + base_url[len("https://"):].rstrip("/") + "/mux"
+    return "ws://" + base_url.removeprefix("http://").rstrip("/") + "/mux"
+
+
+def _scoped_frame_error(terminal_id: str) -> dict:
+    return _terminal_error_frame(
+        f"this terminal stream is scoped to one session; refusing terminal id {terminal_id!r}",
+        terminal_id)
+
+
+@router.websocket("/sessions/{session_id}/terminal")
+async def session_terminal(ws: WebSocket, session_id: str):
+    """Pipe frames between this browser tab and the daemon's /mux, scoped to
+    the named session's PTY handle.
+
+    Frame flow is verbatim in both directions (the browser builds and parses
+    the mux protocol itself, so the proxy stays protocol-thin); frames that
+    would attach to a different session's pane never leave the proxy.
+    """
+    if not _ws_upgrade_authorized(ws):
+        await ws.close(code=1008)
+        return
+    if not terminal_view_enabled():
+        await ws.close(code=4403)
+        return
+    await ws.accept()
+    try:
+        sess = await asyncio.to_thread(client().get_session, session_id)
+    except AOApiError as err:
+        await ws.send_json(_terminal_error_frame(f"session lookup failed: {err.message}"))
+        await ws.close(code=4404 if err.is_gone else 1011)
+        return
+    handle = str(sess.get("terminalHandleId") or "")
+    if not handle:
+        await ws.send_json(_terminal_error_frame(
+            "session has no live terminal (headless harness)"))
+        await ws.close(code=1000)
+        return
+    try:
+        from websockets.asyncio.client import connect as ws_connect
+    except ImportError:
+        await ws.send_json(_terminal_error_frame(
+            "the websockets library is unavailable in this environment"))
+        await ws.close(code=1011)
+        return
+    mux_url = _mux_ws_url(ao_base_url())
+    try:
+        async with ws_connect(mux_url, max_size=TERMINAL_FRAME_MAX_BYTES) as up:
+            async def browser_to_daemon():
+                while True:
+                    raw = await ws.receive_text()
+                    if len(raw) > TERMINAL_FRAME_MAX_BYTES:
+                        await ws.send_json(_terminal_error_frame(
+                            f"frame exceeds {TERMINAL_FRAME_MAX_BYTES} bytes"))
+                        continue
+                    try:
+                        frame = json.loads(raw)
+                    except ValueError:
+                        continue  # not JSON — drop, keep the stream alive
+                    if (not isinstance(frame, dict) or frame.get("ch") != "terminal"
+                            or not frame.get("id")):
+                        continue  # not a terminal frame — this route's only channel
+                    tid = str(frame["id"])
+                    if tid != handle:
+                        await ws.send_json(_scoped_frame_error(tid))
+                        continue
+                    await up.send(raw)
+
+            async def daemon_to_browser():
+                async for msg in up:
+                    if isinstance(msg, str):
+                        await ws.send_text(msg)
+
+            pumps = (asyncio.create_task(browser_to_daemon()),
+                     asyncio.create_task(daemon_to_browser()))
+            try:
+                # Either leg ending (browser closed the tab, daemon dropped the
+                # socket) tears the whole proxy down; the frontend reconnects.
+                await asyncio.wait(pumps, return_when=asyncio.FIRST_COMPLETED)
+            finally:
+                for t in pumps:
+                    t.cancel()
+                await asyncio.gather(*pumps, return_exceptions=True)
+    except WebSocketDisconnect:
+        return
+    except Exception as exc:
+        log.warning("ao-bridge terminal proxy error (%s): %s", session_id, exc)
+        try:
+            await ws.send_json(_terminal_error_frame(
+                f"terminal stream failed: {exc}"))
+            await ws.close(code=1011)
+        except Exception:
+            pass  # the browser tab is already gone
 
 
 # ---------------------------------------------------------------------------

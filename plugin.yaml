@@ -1,5 +1,5 @@
 name: ao-bridge
-version: 0.7.0
+version: 0.8.0
 label: AO Bridge
 description: Agent Orchestrator bridge — a Kanban board over the local AO daemon (projects, sessions, spawn, steer)
 author: Wesley Matos
@@ -16,6 +16,10 @@ config_schema:
     type: bool
     default: false
     description: Show the "Open in AO" deep-link buttons. Off by default — AO's open-url handler doesn't route session deep links yet (the app focuses but doesn't navigate); flip on once upstream AO handles session paths
+  terminal_view:
+    type: bool
+    default: true
+    description: Live terminal tab on the card detail sheet — attach to a worker's PTY through the AO daemon mux, with interactive input. Local-only, but it grants terminal input to your own worker sessions (see the README security table)
   relay_enabled:
     type: bool
     default: false

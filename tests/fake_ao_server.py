@@ -50,6 +50,7 @@ class FakeAO:
         self.sends: list[dict] = []              # send payloads seen
         self.steers: list[dict] = []             # steer-or-send payloads seen
         self.steer_error: Optional[tuple] = None  # (code, status, message) to answer instead
+        self.conversation_status: Optional[int] = None  # e.g. 409 (TUI-mode session)
         self.killed: list[str] = []
         self.pins: list[tuple[str, bool]] = []   # (session_id, pinned) seen
         self.renames: list[tuple[str, str]] = []  # (session_id, name) seen
@@ -137,6 +138,12 @@ class _Handler(BaseHTTPRequestHandler):
             session_id = self._session_id()
             if session_id not in ao.sessions_by_id:
                 return self._json(404, {"error": "not found"})
+            if ao.conversation_status is not None:
+                return self._json(ao.conversation_status, {
+                    "error": "conflict",
+                    "code": "CONVERSATION_UNAVAILABLE",
+                    "message": "this session was created in Terminal UI mode and has no chat conversation",
+                })
             ao.conversation_requests.append(session_id)
             return self._json(200, {"sessionId": session_id,
                                     "latestSequence": len(ao.conversations.get(session_id) or []),

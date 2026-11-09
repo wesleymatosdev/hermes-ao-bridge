@@ -48,6 +48,16 @@ approval mode), steer and message sessions without leaving the board, pin and
 rename sessions from the detail sheet, and archive sessions (with
 confirmation — archiving terminates the session via the daemon).
 
+**The terminal.** Sessions spawned with the TUI interface get a **Terminal**
+tab in the card detail sheet (alongside the transcript): a live, interactive
+view of the worker's actual PTY, streamed through the AO daemon's own
+terminal multiplexer. Render, input, and resize all work — type at the
+agent's prompt, watch a turn scroll by, and the view re-attaches on its own
+after a daemon or dashboard restart. Input is brokered by the daemon: while
+an exclusive session operation is in progress (agent switch, resume, kill)
+the pane goes view-only. Headless (chat-mode) sessions have no terminal and
+show no tab; `terminal_view: false` turns the whole feature off.
+
 | AO session state | Board surface |
 |---|---|
 | `isTerminated` / status `terminated` | Archive strip (below) |
@@ -264,6 +274,7 @@ plugins:
 | Key | Default | What it does |
 |---|---|---|
 | `ao_base_url` | `http://127.0.0.1:3001` | Base URL of the AO daemon's REST API. Loopback only. |
+| `terminal_view` | `true` | Live terminal tab on the card detail sheet (see "The terminal" above). Local-only, but it grants terminal input to your own worker sessions — see the security table. |
 | `relay_enabled` | `false` | Turn on the AO event relay (see below). |
 | `relay_delivery` | `auto` | Delivery route: `auto` (api_server when configured, else peer) / `api_server` / `peer`. Relay only. |
 | `relay_events` | `[]` (all) | Which event kinds to relay: `report_done`, `report_checkpoint`, `report_stuck`, `report_needs_input`, `session_idle`, `session_exited`, `session_terminated`. |
@@ -378,6 +389,7 @@ exactly as for any turn in it.
 | **Spawns agent sessions** | `POST …/spawn` creates a real AO worker session (an AI coding agent) that executes tasks in that project's workspace. |
 | **Archives agent sessions** | The card's Archive action calls the daemon's kill endpoint, terminating a running session. Unsaved work in its workspace is lost. |
 | **Messages agents** | The Message action posts into a running session; the agent treats it as user input and acts on it. |
+| **Types into worker terminals** | With `terminal_view` (default on), the detail sheet's Terminal tab attaches to a worker's live PTY through the daemon's mux — **every keystroke you type there executes inside that worker's terminal**, with the same authority as typing in the AO desktop app. It is loopback-only and behind the dashboard's auth, but anyone who can reach your dashboard can do everything the terminal view allows. The daemon's input lease makes the pane view-only while an exclusive session operation runs. Set `terminal_view: false` to disable. |
 | **Reads AO state** | The board, detail sheet and relay read the daemon's project/session/report endpoints. Read-only. |
 | **Relays AO events (opt-in)** | With `relay_enabled`, the backend submits worker milestones as live turns to the destination session through the gateway's api_server session-chat route (URL auto-detected from config.yaml, loopback by default). A delivered event wakes that session. Authenticated with your pasted `API_SERVER_KEY` (`relay_api_key`) or a peer's scoped `HERMES_PEER_<NAME>_KEY`. |
 
@@ -393,6 +405,13 @@ agents can't call them headlessly — call the daemon's own loopback REST API
 directly instead.
 
 ## Known limitations
+
+- **The terminal view renders one PTY for everyone.** The daemon's mux gives
+  every viewer the same pane and the same authoritative grid (the largest
+  primary viewer wins), exactly like two windows on the AO desktop app — it
+  is a shared view, not per-viewer terminals. TUI-mode sessions have no chat
+  conversation, so their sheet shows the metadata and terminal only.
+- **Intra-turn card motion is bounded by the daemon.** A session's row is
 
 - **Intra-turn card motion is bounded by the daemon.** A session's row is
   static for the length of a turn, so a working card's plan step refreshes on

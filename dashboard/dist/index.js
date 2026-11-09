@@ -89,6 +89,41 @@
     return map;
   }
 
+  // Vendored xterm.js (@xterm/xterm 5.5.0 + @xterm/addon-fit 0.10.0, MIT —
+  // dist/vendor/ with the licenses kept alongside). Chosen over riotermjs
+  // (Rio's wasm engine, 0.1.x): the plugin has no build step, so it needs
+  // plain-script UMD builds and a proven fit/resize API — rioterm ships an
+  // ESM+wasm graph with no stable fit story yet. xterm.js is also exactly
+  // what the AO desktop drives against this same mux, so protocol behavior
+  // (full repaint per attach, server-pushed authoritative resizes) matches.
+  // Loaded lazily on first Terminal-tab activation; nothing hits a CDN.
+  let xtermLibPromise = null;
+  function loadTag(tag, attrs) {
+    return new Promise(function (resolve, reject) {
+      const el = document.createElement(tag);
+      Object.keys(attrs).forEach(function (k) { el.setAttribute(k, attrs[k]); });
+      el.onload = function () { resolve(); };
+      el.onerror = function () { el.remove(); reject(new Error("failed to load " + (attrs.src || attrs.href))); };
+      document.head.appendChild(el);
+    });
+  }
+  function loadXterm() {
+    if (!xtermLibPromise) {
+      xtermLibPromise = Promise.all([
+        loadTag("link", { rel: "stylesheet", href: ASSET_BASE + "/dist/vendor/xterm.css" }),
+        loadTag("script", { src: ASSET_BASE + "/dist/vendor/xterm.js" }),
+        loadTag("script", { src: ASSET_BASE + "/dist/vendor/addon-fit.js" }),
+      ]).then(function () {
+        if (!window.Terminal || !window.FitAddon || !window.FitAddon.FitAddon) {
+          throw new Error("xterm.js did not register its globals");
+        }
+        return { Terminal: window.Terminal, FitAddon: window.FitAddon.FitAddon };
+      });
+      xtermLibPromise.catch(function () { xtermLibPromise = null; });
+    }
+    return xtermLibPromise;
+  }
+
   // Disk-served manifest version: what a fresh page load WOULD run. Compared
   // against the backend's import-time pluginVersion (board payloads, error
   // payloads, WS frames): the dashboard imports plugin_api.py ONCE at
@@ -1179,6 +1214,308 @@
   }
 
   // --- Detail sheet (card click; read-only) --------------------------------
+  // --- Terminal view: mux framing + attachment ------------------------------
+  //
+  // Wire protocol = the AO daemon's terminal multiplexer (GET /mux; AO source
+  // backend/internal/terminal/protocol.go, mirrored from the desktop app's
+  // lib/terminal-mux.ts): one JSON socket, frames channel-tagged ("ch").
+  // "terminal" frames carry PTY bytes base64-encoded (arbitrary bytes, not
+  // always UTF-8), keyed by the session's runtime handle. open{id,cols,rows}
+  // → opened{id} + full repaint as data{id,data}; data{id,data} = keystrokes
+  // in; resize{id,cols,rows} negotiates the shared grid — the daemon pushes
+  // its authoritative grid back as a resize frame, which wins; close{id}
+  // detaches; ch "system" ping/pong liveness. Input is lease-gated
+  // server-side (exclusive session ops answer error frames): we surface that
+  // as a view-only banner rather than trying to lock input here — the mux
+  // deliberately does NOT arbitrate typing between viewers.
+
+  function bytesToBase64(bytes) {
+    let binary = "";
+    const chunk = 0x8000;
+    for (let i = 0; i < bytes.length; i += chunk) {
+      binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+    }
+    return btoa(binary);
+  }
+
+  function base64ToBytes(b64) {
+    const binary = atob(b64);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
+    return bytes;
+  }
+
+  function muxOpenFrame(id, cols, rows) {
+    return JSON.stringify({ ch: "terminal", type: "open", id: id, cols: cols, rows: rows });
+  }
+  function muxDataFrame(id, str) {
+    return JSON.stringify({ ch: "terminal", type: "data", id: id, data: bytesToBase64(new TextEncoder().encode(str)) });
+  }
+  function muxResizeFrame(id, cols, rows) {
+    return JSON.stringify({ ch: "terminal", type: "resize", id: id, cols: cols, rows: rows });
+  }
+  function muxCloseFrame(id) {
+    return JSON.stringify({ ch: "terminal", type: "close", id: id });
+  }
+  function muxPingFrame() {
+    return JSON.stringify({ ch: "system", type: "ping" });
+  }
+
+  const TERM_PHASE_LABEL = {
+    loading: "Loading terminal…",
+    connecting: "Attaching…",
+    attached: "Live",
+    reattaching: "Reconnecting…",
+    exited: "Process exited",
+    error: "Terminal error",
+    failed: "Terminal unavailable",
+  };
+
+  // One live attachment: a proxied mux WebSocket bound to an xterm instance.
+  // Reconnects with capped backoff while the sheet is open (daemon restarts);
+  // a pane error or process exit stops retrying (the PTY is gone) and the
+  // user decides via Reconnect. Returns { dispose, reconnect, onVisible }.
+  function attachTerminal(opts) {
+    const sessionId = opts.sessionId;
+    const handle = opts.handle;
+    const term = opts.term;
+    const fit = opts.fit;
+    const setPhase = opts.setPhase;
+    const setPhaseMsg = opts.setPhaseMsg;
+    const setInputBlocked = opts.setInputBlocked;
+    let phase = "connecting";
+    let attempts = 0;
+    let disposed = false;
+    let ws = null;
+    let pingTimer = null;
+    let retryTimer = null;
+    let lastGrid = null;
+
+    function setOwnPhase(next) {
+      if (disposed) return;
+      phase = next;
+      setPhase(next);
+    }
+
+    function send(frame) {
+      if (ws && ws.readyState === 1) ws.send(frame);
+    }
+
+    function fitAndPublish() {
+      try { fit.fit(); } catch (_e) { return; } // 0×0 while the tab is hidden
+      const g = { cols: term.cols, rows: term.rows };
+      if (g.cols > 0 && g.rows > 0 &&
+          (!lastGrid || lastGrid.cols !== g.cols || lastGrid.rows !== g.rows)) {
+        lastGrid = g;
+        send(muxResizeFrame(handle, g.cols, g.rows));
+      }
+    }
+
+    function clearPing() {
+      if (pingTimer) { window.clearInterval(pingTimer); pingTimer = null; }
+    }
+
+    function dropSocket() {
+      clearPing();
+      if (ws) { try { ws.close(); } catch (_e) { /* already closing */ } ws = null; }
+    }
+
+    function scheduleReconnect() {
+      if (disposed || retryTimer) return;
+      if (phase === "exited" || phase === "error") return; // PTY gone — user decides
+      setOwnPhase("reattaching");
+      const delay = Math.min(500 * Math.pow(2, attempts), 8000);
+      attempts += 1;
+      retryTimer = window.setTimeout(function () {
+        retryTimer = null;
+        doConnect();
+      }, delay);
+    }
+
+    function handleServerFrame(f) {
+      if (!f || f.ch !== "terminal") return;
+      if (f.type === "data" && f.data) {
+        term.write(base64ToBytes(f.data));
+        return;
+      }
+      if (f.type === "opened") {
+        attempts = 0;
+        setInputBlocked(false);
+        setOwnPhase("attached");
+        setPhaseMsg("");
+        return;
+      }
+      if (f.type === "resize" && f.cols && f.rows) {
+        // Authoritative grid push: the daemon arbitrates the shared PTY size
+        // across viewers (largest primary wins) — follow it, don't re-fight.
+        if (term.cols !== f.cols || term.rows !== f.rows) term.resize(f.cols, f.rows);
+        lastGrid = { cols: f.cols, rows: f.rows };
+        return;
+      }
+      if (f.type === "exited") {
+        setOwnPhase("exited");
+        term.writeln("\r\n\x1b[2m[process exited]\x1b[0m");
+        dropSocket();
+        return;
+      }
+      if (f.type === "error") {
+        const msg = f.error || "unknown terminal error";
+        if (msg.indexOf("input is disabled") !== -1) {
+          // The daemon's input lease: an exclusive operation (agent switch,
+          // resume, kill) owns the pane. View-only until it releases.
+          setInputBlocked(true);
+          return;
+        }
+        setOwnPhase("error");
+        setPhaseMsg(msg);
+        term.writeln("\r\n\x1b[2m[terminal error] " + msg + "\x1b[0m");
+        dropSocket();
+      }
+    }
+
+    function doConnect() {
+      if (disposed) return;
+      SDK.buildWsUrl(API + "/sessions/" + encodeURIComponent(sessionId) + "/terminal", {})
+        .then(function (url) {
+          if (disposed) return;
+          try { ws = new WebSocket(url); } catch (_e) { scheduleReconnect(); return; }
+          ws.onopen = function () {
+            if (disposed) return;
+            if (attempts > 0) term.reset(); // reattach = fresh full repaint; drop the stale buffer first
+            try { fit.fit(); } catch (_e) { /* hidden */ }
+            const g = { cols: term.cols, rows: term.rows };
+            lastGrid = g.cols > 0 && g.rows > 0 ? g : null;
+            send(muxOpenFrame(handle, Math.max(0, g.cols), Math.max(0, g.rows)));
+            clearPing();
+            pingTimer = window.setInterval(function () { send(muxPingFrame()); }, 20000);
+          };
+          ws.onmessage = function (ev) {
+            if (typeof ev.data !== "string") return;
+            let f = null;
+            try { f = JSON.parse(ev.data); } catch (_e) { return; }
+            handleServerFrame(f);
+          };
+          ws.onclose = function () {
+            ws = null;
+            clearPing();
+            scheduleReconnect();
+          };
+          ws.onerror = function () { dropSocket(); };
+        })
+        .catch(function () { scheduleReconnect(); });
+    }
+
+    const dataSub = term.onData(function (data) {
+      if (phase !== "attached") return; // view-only until the pane is open
+      send(muxDataFrame(handle, data));
+    });
+
+    let resizeObserver = null;
+    if (opts.hostEl && typeof ResizeObserver !== "undefined") {
+      resizeObserver = new ResizeObserver(function () { fitAndPublish(); });
+      resizeObserver.observe(opts.hostEl);
+    }
+
+    setOwnPhase("connecting");
+    doConnect();
+
+    return {
+      dispose: function () {
+        disposed = true;
+        if (retryTimer) { window.clearTimeout(retryTimer); retryTimer = null; }
+        try { send(muxCloseFrame(handle)); } catch (_e) { /* socket already gone */ }
+        dropSocket();
+        if (resizeObserver) resizeObserver.disconnect();
+        dataSub.dispose();
+      },
+      reconnect: function () {
+        if (disposed) return;
+        attempts = 0;
+        setPhaseMsg("");
+        setInputBlocked(false);
+        setOwnPhase("connecting");
+        term.reset();
+        if (retryTimer) { window.clearTimeout(retryTimer); retryTimer = null; }
+        doConnect();
+      },
+      // Tab flipped back to visible: 0×0 while hidden must not linger.
+      onVisible: function () { fitAndPublish(); },
+    };
+  }
+
+  function TerminalTab(props) {
+    const hostRef = useRef(null);
+    const attachRef = useRef(null);
+    const termRef = useRef(null);
+    const [phase, setPhase] = useState("loading");
+    const [phaseMsg, setPhaseMsg] = useState("");
+    const [inputBlocked, setInputBlocked] = useState(false);
+
+    useEffect(function () {
+      let dead = false;
+      let localAttach = null;
+      loadXterm().then(function (lib) {
+        if (dead || !hostRef.current) return;
+        const term = new lib.Terminal({
+          scrollback: 5000,
+          fontSize: 12,
+          cursorBlink: true,
+          fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace',
+          theme: { background: "#101426", foreground: "#dfe3ff", cursor: "#dfe3ff",
+                   selectionBackground: "rgba(124, 108, 255, 0.35)" },
+        });
+        const fit = new lib.FitAddon();
+        term.loadAddon(fit);
+        term.open(hostRef.current);
+        termRef.current = term;
+        localAttach = attachTerminal({
+          sessionId: props.sessionId,
+          handle: props.handle,
+          term: term,
+          fit: fit,
+          hostEl: hostRef.current,
+          setPhase: setPhase,
+          setPhaseMsg: setPhaseMsg,
+          setInputBlocked: setInputBlocked,
+        });
+        attachRef.current = localAttach;
+      }).catch(function (e) {
+        if (dead) return;
+        setPhase("failed");
+        setPhaseMsg(String((e && e.message) || e));
+      });
+      return function () {
+        dead = true;
+        if (localAttach) localAttach.dispose();
+        attachRef.current = null;
+        termRef.current = null;
+      };
+    }, [props.sessionId]);
+
+    useEffect(function () {
+      if (props.active && attachRef.current) attachRef.current.onVisible();
+    }, [props.active]);
+
+    const showRetry = phase === "exited" || phase === "error" || phase === "failed";
+    return h("div", { className: "ao-terminal" + (props.active ? "" : " is-hidden") },
+      h("div", { className: "ao-term-status" },
+        h("span", { className: "ao-term-phase ao-term-" + phase },
+          TERM_PHASE_LABEL[phase] || phase,
+          phaseMsg && phase !== "failed" ? " — " + phaseMsg : ""),
+        inputBlocked
+          ? h("span", { className: "ao-term-blocked",
+              title: "The AO daemon answers keystrokes with an error while an exclusive session operation (agent switch, resume, kill) holds the input lease." },
+            "View-only — an exclusive session operation holds the input lease")
+          : null,
+        showRetry
+          ? h("button", { className: "ao-btn ao-btn-ghost ao-term-retry",
+              onClick: function () { if (attachRef.current) attachRef.current.reconnect(); } }, "Reconnect")
+          : null),
+      h("div", { className: "ao-term-host", ref: hostRef }),
+      phase === "failed" ? h("div", { className: "ao-sheet-error" }, phaseMsg) : null
+    );
+  }
+
   // Opens at the LATEST message and follows new ones while open: the sheet
   // watches the session over the plugin's /events WS ("watch" -> "detail"
   // pushes; the watch payload includes the live plan, so the plan updates
@@ -1195,6 +1532,10 @@
     const [wsFailed, setWsFailed] = useState(false);
     const [live, setLive] = useState(false);
     const [busy, setBusy] = useState(null);
+    // Sheet tabs: transcript (default) | terminal. terminalOpened is sticky
+    // for the session so flipping tabs doesn't re-attach the PTY every time.
+    const [sheetTab, setSheetTab] = useState("transcript");
+    const [terminalOpened, setTerminalOpened] = useState(false);
     const chatRef = useRef(null);
     const pinnedRef = useRef(true);
     const session = props.session;
@@ -1261,6 +1602,7 @@
       let alive = true;
       setDetail(null); setErr(null);
       setFollow(true); setLive(false); setWsFailed(false);
+      setSheetTab("transcript"); setTerminalOpened(false);
       authedFetchJson(API + "/sessions/" + encodeURIComponent(session.id) + "/detail")
         .then(function (d) { if (alive) setDetail(d); })
         .catch(function (e) { if (alive) setErr(parseApiErrorMessage(e)); });
@@ -1318,6 +1660,9 @@
 
     const s = detail && detail.session;
     const projectId = (s && s.projectId) || session.projectId || "";
+    // Terminal tab: backend-gated (terminal_view) and only for sessions the
+    // daemon gave a PTY handle (headless harnesses have none).
+    const hasTerminal = Boolean(s && s.terminalView && s.terminalHandleId);
     const chatItems = detail
       ? timelineItems(detail.transcript, detail.activities, hiddenClasses)
       : [];
@@ -1333,6 +1678,13 @@
             : null),
         !detail && !err ? h("div", { className: "ao-loading" }, "Loading session detail…") : null,
         err ? h("div", { className: "ao-sheet-error" }, err) : null,
+        hasTerminal
+          ? h("div", { className: "ao-sheet-tabs" },
+              h("button", { className: "ao-tab" + (sheetTab === "transcript" ? " is-active" : ""),
+                onClick: function () { setSheetTab("transcript"); } }, "Transcript"),
+              h("button", { className: "ao-tab" + (sheetTab === "terminal" ? " is-active" : ""),
+                onClick: function () { setSheetTab("terminal"); setTerminalOpened(true); } }, "Terminal"))
+          : null,
         s ? h("div", { className: "ao-detail-meta" },
           h("div", { className: "ao-detail-row" }, h("span", { className: "ao-detail-key" }, "Status"), h("span", null, s.displayStatus || s.status || "—")),
           h("div", { className: "ao-detail-row" }, h("span", { className: "ao-detail-key" }, "Project"), h("span", null, s.projectId || "standalone")),
@@ -1375,12 +1727,15 @@
                     h("span", { className: "ao-plan-text" }, st.text));
                 })))
           : null,
-        s ? h("div", { className: "ao-detail-transcript" },
+        // Kept mounted while the Terminal tab is up (display:none) so the
+        // transcript scroll position and a half-typed composer draft survive
+        // a tab flip.
+        s ? h("div", { className: "ao-detail-transcript" + (sheetTab === "terminal" ? " is-hidden" : "") },
           h("div", { className: "ao-detail-key" },
             "Transcript" +
             (detail.transcriptTruncated ? " (last " + detail.transcript.length + " of " + detail.transcriptTotal + " messages)" : "") +
             (live ? " — live" : wsFailed ? " — polling" : "")),
-          h("div", { className: "ao-class-filters" },
+          detail.conversationNote ? null : h("div", { className: "ao-class-filters" },
             Object.keys(MSG_CLASSES).map(function (id) {
               const off = !!hiddenClasses[id];
               return h("button", {
@@ -1391,7 +1746,9 @@
               }, (off ? "\u25CB " : "\u25CF ") + MSG_CLASSES[id].label);
             })),
           h("div", { className: "ao-chat", ref: chatRef, onScroll: onChatScroll },
-            chatItems.length === 0
+            detail.conversationNote
+              ? h("div", { className: "ao-column-empty" }, detail.conversationNote)
+              : chatItems.length === 0
               ? h("div", { className: "ao-column-empty" }, "Nothing to show in the selected classes")
               : chatItems.map(function (it, i) {
                   if (it.kind === "activity") {
@@ -1430,6 +1787,10 @@
                             working: ((detail && detail.session.status) || session.status || "") === "working" })
             : null
         ) : null,
+        hasTerminal && terminalOpened
+          ? h(TerminalTab, { sessionId: session.id, handle: s.terminalHandleId,
+                             active: sheetTab === "terminal" })
+          : null,
         detail ? h(EnrichedSection, { enriched: detail.hermesEnriched }) : null,
         h("div", { className: "ao-sheet-actions" },
           h("button", {

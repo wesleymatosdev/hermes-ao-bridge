@@ -1702,3 +1702,104 @@ a.ao-btn.ao-open-ao { font-size: 12px; }
   font-size: 11px;
   color: var(--ao-text-dim);
 }
+
+/* --- card detail sheet tabs (transcript | terminal) ------------------------ */
+
+.ao-sheet-tabs {
+  display: flex;
+  gap: 6px;
+  border-bottom: 1px solid var(--ao-border);
+  padding-bottom: 6px;
+}
+
+.ao-tab {
+  appearance: none;
+  border: 1px solid transparent;
+  background: none;
+  color: var(--ao-text-dim);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  padding: 4px 12px;
+  border-radius: 999px;
+  cursor: pointer;
+}
+
+.ao-tab:hover {
+  color: var(--ao-text);
+}
+
+.ao-tab.is-active {
+  color: var(--ao-text);
+  border-color: var(--ao-border-bright);
+  background: var(--ao-bg-card);
+}
+
+/* --- terminal view --------------------------------------------------------- */
+
+.is-hidden {
+  display: none !important;
+}
+
+.ao-terminal {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  border-top: 1px solid var(--ao-border);
+  padding-top: 10px;
+}
+
+.ao-term-status {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  font-size: 11px;
+  color: var(--ao-text-dim);
+  min-height: 18px;
+}
+
+.ao-term-phase {
+  letter-spacing: 0.02em;
+}
+
+.ao-term-attached {
+  color: var(--ao-good);
+}
+
+.ao-term-reattaching,
+.ao-term-connecting {
+  color: var(--ao-warn);
+}
+
+.ao-term-error,
+.ao-term-exited,
+.ao-term-failed {
+  color: var(--ao-bad);
+}
+
+.ao-term-blocked {
+  color: var(--ao-warn);
+  border: 1px solid var(--ao-border);
+  border-radius: 999px;
+  padding: 2px 9px;
+  background: rgba(251, 191, 36, 0.08);
+}
+
+.ao-term-retry {
+  font-size: 11px;
+  padding: 2px 10px;
+}
+
+.ao-term-host {
+  height: 320px;
+  border: 1px solid var(--ao-border);
+  border-radius: 10px;
+  background: #101426;
+  padding: 4px;
+  overflow: hidden;
+}
+
+.ao-term-host .terminal.xterm {
+  height: 100%;
+}
