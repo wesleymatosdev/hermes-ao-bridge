@@ -74,11 +74,15 @@ Message sheet — send a user-authored message to a running session:
   `ao://sessions/…` link — read-only. The transcript reads as an
   iMessage-style chat: rounded bubbles aligned by sender class —
   **Worker** turns on the left (green), **End user** messages on the right
-  (purple/cyan gradient), **Orchestrator / other agent** on the left with a
+  (purple/cyan gradient), **Orchestrator / automation** on the left with a
   dashed amber bubble — each with a small class label and its own
-  click-to-hide filter chip. Classification comes from the daemon's
-  `authoredByUser` wire flag (Worker = assistant turns, End user =
-  `authoredByUser: true`, everything else = Orchestrator / other agent).
+  click-to-hide filter chip. Provenance (v0.2.4): classification keys on the
+  daemon's `origin` field, the only reliable signal — `human` is set only
+  for messages typed in the AO app, `automation` for every REST `/send`
+  call. `authoredByUser` is **self-declared** by whoever calls the send
+  endpoint (any orchestrator can pass `userAuthored: true`), so it never
+  grants the "End user" class; Worker = assistant turns, End user =
+  `origin: "human"`, everything else = Orchestrator / automation.
 - **Spawn form**: pick a registered AO project, harness, session name, and
   initial prompt → creates the worker via the AO daemon.
 - **Message sheet**: send a user-authored message to any live session.

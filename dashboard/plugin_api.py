@@ -455,8 +455,12 @@ def detail(session_id: str):
             m for m in (
                 {"role": m.get("role") or "", "text": m.get("text") or "",
                  "createdAt": m.get("createdAt") or "",
-                 # Wire truth: the daemon marks this omitempty, so an absent
-                 # flag means false (agent/orchestrator-originated).
+                 # Wire truth (probed on the live daemon, 2026-11-09): origin is
+                 # the reliable provenance signal — "human" only for sends typed
+                 # in the AO app, "automation" for every REST /send call.
+                 # authoredByUser is self-declared by the sender (whoever passes
+                 # userAuthored: true) and proves nothing about human authorship.
+                 "origin": m.get("origin") or "",
                  "authoredByUser": bool(m.get("authoredByUser"))}
                 for m in tail if isinstance(m, dict)
             ) if m["text"]

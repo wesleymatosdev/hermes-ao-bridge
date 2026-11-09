@@ -324,20 +324,24 @@
   }
 
   // --- Card detail: message classes -----------------------------------------
-  // Three classes over the daemon's wire truth (authoredByUser is omitempty,
-  // so absent = false):
+  // Three classes over the daemon's wire truth (probed live, 2026-11-09):
+  // origin is the reliable provenance signal — "human" only for messages
+  // typed in the AO app, "automation" for every REST /send call regardless
+  // of the userAuthored flag, "provider" for assistant turns. authoredByUser
+  // is self-declared by the sender and proves nothing (an orchestrator can
+  // pass userAuthored: true), so it is never used to claim "End user":
   //   worker       — assistant turns (the harness's own output)
-  //   user         — authoredByUser=true (End user)
-  //   orchestrator — everything else non-assistant (Orchestrator / other agent)
+  //   user         — origin=human (End user)
+  //   orchestrator — everything else non-assistant (Orchestrator / automation)
   const MSG_CLASSES = {
     worker: { label: "Worker", title: "The harness's own output (assistant turns)" },
-    user: { label: "End user", title: "Authored by the session's user (authoredByUser)" },
-    orchestrator: { label: "Orchestrator / other agent", title: "Not user-authored and not an assistant turn" },
+    user: { label: "End user", title: "Typed by the session's user in the AO app (origin=human)" },
+    orchestrator: { label: "Orchestrator / automation", title: "Injected via the REST /send path (origin=automation), or otherwise not a human or worker turn" },
   };
 
   function messageClass(m) {
     if ((m.role || "").toLowerCase() === "assistant") return "worker";
-    if (m.authoredByUser) return "user";
+    if ((m.origin || "").toLowerCase() === "human") return "user";
     return "orchestrator";
   }
 
