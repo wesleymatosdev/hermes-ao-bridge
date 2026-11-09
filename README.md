@@ -128,15 +128,19 @@ plugins:
 |---|---|---|
 | `ao_base_url` | `http://127.0.0.1:3001` | Base URL of the AO daemon's REST API. Loopback only. |
 | `relay_enabled` | `false` | Turn on the AO event relay (see below). |
+| `relay_delivery` | `auto` | Delivery route: `auto` (api_server when configured, else peer) / `api_server` / `peer`. Relay only. |
 | `relay_events` | `[]` (all) | Which event kinds to relay: `report_done`, `report_checkpoint`, `report_stuck`, `report_needs_input`, `session_idle`, `session_exited`, `session_terminated`. |
-| `relay_api_url` | `http://127.0.0.1:8642` | Gateway api_server base URL the relay delivers through (loopback). Relay only. |
-| `relay_peer` | *(empty)* | Name of a Hermes peer whose `HERMES_PEER_<NAME>_KEY` authenticates relay delivery; falls back to `API_SERVER_KEY` when unset. Relay only. |
+| `relay_api_url` | *(auto-detect)* | Gateway api_server base URL the relay delivers through (loopback). Empty auto-detects from your config.yaml api_server settings. Relay only. |
+| `relay_api_key` | *(empty)* | Your gateway's `API_SERVER_KEY`, pasted here — authenticates the api_server delivery route ([Enable delivery](#enable-delivery)). Relay only. |
+| `relay_peer` | *(empty)* | Optional enhancement: name of a Hermes peer whose `HERMES_PEER_<NAME>_KEY` authenticates relay delivery when no api_server key is set (falls back to `API_SERVER_KEY`). Relay only. |
 | `relay_session` | *(empty)* | Override destination for events whose orchestrator mapping can't resolve (see the relay section). Normal destinations are resolved per event; `GET /api/plugins/ao-bridge/relay/sessions` lists recent sessions to copy from. Relay only. |
 
 For development, `AO_BRIDGE_BASE_URL` overrides the daemon URL (the config
 setting wins when both are set). The backend reads nothing beyond the table
-above; the relay's delivery credential comes from Hermes's secret store, not
-from plugin config.
+above; the relay's api_server URL is auto-detected from config.yaml, and the
+plugin never reads any credential from Hermes config or env on its own —
+api_server delivery uses the key you paste into `relay_api_key`, the peer
+route uses Hermes's secret store (same scoped mechanism `hermes peer` uses).
 
 ## AO event relay (opt-in)
 
@@ -163,20 +167,72 @@ destination session immediately and costs it a model turn**: the agent sees
 the milestone right away and may act on it — that's the point. Milestones
 landing within ~5 seconds share one turn (max 8 lines), so the cost is per
 burst, not per event; the `relay_events` filter keeps quiet projects quiet.
-The relay needs the gateway's api_server reachable (loopback by default) and
-a Hermes-held credential: set `relay_peer` to a peer name (its
-`HERMES_PEER_<NAME>_KEY` is used, scoped like `hermes peer` resolves it) or
-let it fall back to `API_SERVER_KEY`.
+
+**Delivery is a two-tier route** (`relay_delivery` picks: `auto` /
+`api_server` / `peer`):
+
+1. **`api_server` — the generic route (works for anyone).** Uses the stock
+   [api_server platform](https://hermes-agent.nousresearch.com/docs/user-guide/features/api-server)
+   of your own gateway, authenticated with your `API_SERVER_KEY` pasted into
+   `relay_api_key`. Any Hermes user can enable it — no peer setup, no
+   1Password, nothing machine-specific.
+2. **`peer` — optional enhancement.** Uses a registered bot peer's scoped
+   key (`hermes peer add` → `HERMES_PEER_<NAME>_KEY`, resolved through the
+   same secret-scope read `hermes peer` uses). The original credential path;
+   kept for setups that already have a peer registered.
+
+`auto` (the default) uses api_server when `relay_api_key` is set, else peer
+when a peer key resolves. When neither is configured, nothing is delivered
+**and the dashboard says so** — an amber "delivery not configured" banner
+pointing at [Enable delivery](#enable-delivery) (the `GET
+/api/plugins/ao-bridge/relay` diagnostics carry the same state and reason).
+It is never a silent no-op. An explicitly picked route that is unavailable
+stays unavailable — it never silently falls back to the other one.
+
+#### Enable delivery
+
+1. **Enable the api_server platform on your gateway.** In `~/.hermes/.env`:
+
+   ```bash
+   API_SERVER_ENABLED=true
+   API_SERVER_KEY=change-me-long-random
+   ```
+
+   then start (or restart) the gateway — it listens on `http://127.0.0.1:8642`
+   by default (`platforms.api_server.host` / `.port` in config.yaml override
+   the bind; the plugin auto-detects that address for `relay_api_url`, so you
+   normally never set the URL yourself).
+
+2. **Paste that same key into the plugin config** (`config.yaml`):
+
+   ```yaml
+   plugins:
+     entries:
+       ao-bridge:
+         settings:
+           relay_enabled: true
+           relay_api_key: change-me-long-random   # your API_SERVER_KEY
+   ```
+
+   The plugin dials your gateway's api_server on loopback with this key — the
+   same secret your own machine already holds; it never leaves the machine,
+   and the plugin never reads it from Hermes config or env on its own.
+
+3. **Optional enhancement — a peer credential instead.** If you already run
+   bot peers, set `relay_peer: <name>`; the relay then authenticates with
+   that peer's scoped `HERMES_PEER_<NAME>_KEY`. Under `relay_delivery: auto`
+   an api_server key, when present, still wins.
 
 The relay deduplicates on stable report ids (AO's repeat-count churn never
 re-relays the same state), records a baseline on its first poll so enabling it
 doesn't flood any conversation with history, stays silent through daemon
 downtime, and retries when the gateway is busy or unreachable (permanent
-failures — no credential, gone session — drop the batch and surface in
-diagnostics). `GET /api/plugins/ao-bridge/relay` reports enabled state,
-credential source, pending destinations, delivered count and last error. It
-makes no platform sends: the conversation's own bound surfaces render the
-exchange, exactly as for any turn in it.
+failures — route not configured, gone session — drop the batch and surface in
+diagnostics and the dashboard banner). `GET /api/plugins/ao-bridge/relay`
+reports enabled state, the delivery route (mode, active route, configured,
+reason), pending destinations, delivered count and last error. It makes no
+platform sends: the conversation's own bound surfaces render the exchange,
+exactly as for any turn in it.
 
 ## Security & privacy
 
@@ -186,13 +242,16 @@ exchange, exactly as for any turn in it.
 | **Archives agent sessions** | The card's Archive action calls the daemon's kill endpoint, terminating a running session. Unsaved work in its workspace is lost. |
 | **Messages agents** | The Message action posts into a running session; the agent treats it as user input and acts on it. |
 | **Reads AO state** | The board, detail sheet and relay read the daemon's project/session/report endpoints. Read-only. |
-| **Relays AO events (opt-in)** | With `relay_enabled`, the backend submits worker milestones as live turns to the destination session through the gateway's api_server session-chat route (`relay_api_url`, loopback by default). A delivered event wakes that session. Authenticated with a Hermes-held key (`HERMES_PEER_<NAME>_KEY` or `API_SERVER_KEY`) — the plugin config holds no secrets. |
+| **Relays AO events (opt-in)** | With `relay_enabled`, the backend submits worker milestones as live turns to the destination session through the gateway's api_server session-chat route (URL auto-detected from config.yaml, loopback by default). A delivered event wakes that session. Authenticated with your pasted `API_SERVER_KEY` (`relay_api_key`) or a peer's scoped `HERMES_PEER_<NAME>_KEY`. |
 
 All network calls go to the local AO daemon on loopback — plus, when the
-relay is enabled, the local gateway api_server it delivers through. The
-plugin's config holds no secrets; the relay's credential is read from
-Hermes's own secret store through the same scoped mechanism `hermes peer`
-uses. Plugin API routes sit behind the dashboard's auth, so scripts and
+relay is enabled, the local gateway api_server it delivers through. The only
+secret in plugin config is `relay_api_key` — your own gateway's
+`API_SERVER_KEY`, authenticating loopback calls to your own machine; it never
+leaves the machine, and the plugin never reads any key from Hermes config or
+env on its own. The optional peer route's credential is read from Hermes's
+own secret store through the same scoped mechanism `hermes peer` uses.
+Plugin API routes sit behind the dashboard's auth, so scripts and
 agents can't call them headlessly — call the daemon's own loopback REST API
 directly instead.
 

@@ -89,18 +89,24 @@ COMMON_HARNESSES = [
 # Configuration
 # ---------------------------------------------------------------------------
 
-def _config_setting(key: str) -> Optional[str]:
-    """Best-effort read of ``plugins.entries.ao-bridge.settings.<key>`` from config.yaml.
-
-    Runs inside the dashboard server, so ``hermes_cli`` is importable there; in
-    bare test harnesses it may not be, and any failure just means "unset".
-    """
+def _load_hermes_config() -> dict:
+    """Best-effort config.yaml read. Runs inside the dashboard server, so
+    ``hermes_cli`` is importable there; in bare test harnesses it may not be,
+    and any failure just means "empty config"."""
     try:
         from hermes_cli.config import load_config_readonly  # type: ignore
     except Exception:  # pragma: no cover - exercised only outside the dashboard server
-        return None
+        return {}
     try:
-        config = load_config_readonly() or {}
+        return load_config_readonly() or {}
+    except Exception:  # pragma: no cover - an unreadable config grants no setting
+        return {}
+
+
+def _config_setting(key: str) -> Optional[str]:
+    """Best-effort read of ``plugins.entries.ao-bridge.settings.<key>`` from config.yaml."""
+    try:
+        config = _load_hermes_config()
         entries = config.get("plugins", {}).get("entries", {})
         settings = entries.get(PLUGIN_ID, {}).get("settings", {})
         value = settings.get(key)
@@ -840,13 +846,16 @@ async def events(ws: WebSocket):
 # ``/worktrees/<project>/orchestrator/``), so different workers can belong to
 # different orchestrators. Delivery rides the gateway's own api_server
 # session-chat route (``POST /api/sessions/{id}/chat`` — the sanctioned
-# immediate-submission path ``hermes peer dm`` drives), authenticated with a
-# Hermes-held secret: a named peer's scoped key (``relay_peer``) or
-# API_SERVER_KEY. No platform sends, no secrets in plugin config: the event
-# WAKES the destination session immediately (a live turn — costs the session
-# a model turn; batching/debounce keeps it one turn per burst), and the
-# conversation's bound surfaces render the exchange. ``relay_session`` is an
-# explicit override for unmappable cases only.
+# immediate-submission path ``hermes peer dm`` drives), with a two-tier route:
+# api_server (generic — the user pastes their gateway's API_SERVER_KEY into
+# ``relay_api_key``; the URL auto-detects from config.yaml) is preferred, and
+# the hermes-peer credential path (``relay_peer`` — a registered bot peer's
+# scoped key, machine-specific) is the fallback/enhancement. ``relay.delivery``
+# picks: auto (default) | api_server | peer. The event WAKES the destination
+# session immediately (a live turn — costs the session a model turn;
+# batching/debounce keeps it one turn per burst), and the conversation's
+# bound surfaces render the exchange. ``relay_session`` is an explicit
+# override for unmappable cases only.
 #
 # Why poll + diff rather than the daemon's event stream: the loopback REST API
 # is the surface this plugin is already built on, while the daemon's stream
@@ -864,11 +873,20 @@ RELAY_NOTE_LIMIT = 140
 # The gateway's api_server listener — the surface ``hermes peer dm`` drives
 # with POST /api/sessions/{id}/chat. The relay submits its batches there so an
 # event becomes a live turn in the destination session (wakes it immediately)
-# instead of a store row that only lands at the session's next turn.
+# instead of a store row that only lands at the session's next turn. The URL
+# auto-detects from the local Hermes config.yaml's api_server address; this
+# stock default covers a gateway on its stock bind.
 RELAY_API_URL_DEFAULT = "http://127.0.0.1:8642"
 # One synchronous agent turn can legitimately take minutes — the same ceiling
 # ``hermes peer dm`` uses.
 RELAY_CHAT_TIMEOUT_S = 600
+
+# Delivery routes. ``api_server`` is the generic one any Hermes user can set
+# up (gateway api_server + its API_SERVER_KEY, pasted into the plugin config);
+# ``peer`` is the hermes-peer credential path (a registered bot peer's scoped
+# key — machine-specific setup). ``auto`` prefers api_server, falls back to
+# peer, and reports "not configured" honestly when neither is available.
+RELAY_DELIVERY_MODES = ("auto", "api_server", "peer")
 
 RELAY_REPORT_STATES = ("done", "checkpoint", "stuck", "needs_input")
 RELAY_SESSION_FROM = "working"
@@ -1012,18 +1030,52 @@ class RelayBatcher:
 
 
 class RelaySettings:
-    __slots__ = ("enabled", "override_session", "events", "api_url", "peer")
+    __slots__ = ("enabled", "override_session", "events", "delivery", "api_url",
+                 "api_key", "peer")
 
     def __init__(self, enabled: bool, override_session: str, events: set,
-                 api_url: str, peer: str):
+                 delivery: str, api_url: str, api_key: str, peer: str):
         self.enabled, self.override_session, self.events = enabled, override_session, events
-        self.api_url, self.peer = api_url, peer
+        self.delivery, self.api_url, self.api_key, self.peer = delivery, api_url, api_key, peer
+
+
+def _normalized_api_host(host: str) -> str:
+    """A host the relay can dial: wildcard binds mean loopback for a plugin
+    that (by contract) only ever talks to the gateway on the same machine."""
+    host = (host or "").strip()
+    return "127.0.0.1" if host in ("", "0.0.0.0", "::", "*") else host
+
+
+def detect_api_url() -> str:
+    """The gateway api_server base URL from Hermes config.yaml — the ADDRESS
+    only, never any credential. Reads the same places the gateway itself does
+    (``platforms.api_server`` / ``gateway.api_server`` / ``gateway.platforms.api_server``;
+    see gateway/config_loader.py merge_platform_sections). "" when config.yaml
+    declares no api_server address — the caller then falls back to the stock
+    bind. Auto-detection is best-effort: a wrong address just fails delivery
+    and shows on /relay, it never breaks the board."""
+    config = _load_hermes_config()
+    if not isinstance(config, dict):
+        return ""
+    gateway = config.get("gateway") if isinstance(config.get("gateway"), dict) else {}
+    for block in (config.get("platforms", {}).get("api_server") if isinstance(config.get("platforms"), dict) else None,
+                  gateway.get("api_server"),
+                  gateway.get("platforms", {}).get("api_server") if isinstance(gateway.get("platforms"), dict) else None):
+        if not isinstance(block, dict):
+            continue
+        port = str(block.get("port") or "").strip()
+        if not port and not str(block.get("host") or "").strip():
+            continue
+        host = _normalized_api_host(str(block.get("host") or ""))
+        return f"http://{host}:{port or '8642'}"
+    return ""
 
 
 def read_relay_settings() -> RelaySettings:
     """relay.* plugin settings; defaults are OFF, and the destination is
     resolved per event from AO's own orchestrator mapping. ``relay_session``
-    is only an explicit override for unmappable cases."""
+    is only an explicit override for unmappable cases. ``relay_api_url``
+    auto-detects from config.yaml when unset."""
     enabled = _config_raw("relay_enabled")
     events_raw = _config_raw("relay_events")
     if isinstance(events_raw, (list, tuple)):
@@ -1031,26 +1083,29 @@ def read_relay_settings() -> RelaySettings:
     else:
         parsed = {part.strip() for part in str(events_raw or "").split(",")} - {""}
     events = parsed & set(DEFAULT_RELAY_EVENTS) if parsed else set(DEFAULT_RELAY_EVENTS)
-    api_url = str(_config_raw("relay_api_url") or "").strip().rstrip("/") or RELAY_API_URL_DEFAULT
+    delivery = str(_config_raw("relay_delivery") or "auto").strip().lower()
+    if delivery not in RELAY_DELIVERY_MODES:
+        delivery = "auto"  # a typoed mode must not silently change the meaning
+    api_url = (str(_config_raw("relay_api_url") or "").strip().rstrip("/")
+               or detect_api_url()
+               or RELAY_API_URL_DEFAULT)
     return RelaySettings(
         enabled=str(enabled).strip().lower() in ("1", "true", "yes", "on"),
         override_session=str(_config_raw("relay_session") or "").strip(),
         events=events,
+        delivery=delivery,
         api_url=api_url,
+        api_key=str(_config_raw("relay_api_key") or "").strip(),
         peer=str(_config_raw("relay_peer") or "").strip(),
     )
 
 
 def _config_raw(key: str):
     """Raw ``plugins.entries.ao-bridge.settings.<key>`` (bools/lists survive);
-    None when unset or unreadable. Best-effort like ``_config_setting``."""
+    None when unset. Best-effort like ``_config_setting``."""
     try:
-        from hermes_cli.config import load_config_readonly  # type: ignore
-    except Exception:  # pragma: no cover - exercised only outside the dashboard server
-        return None
-    try:
-        config = load_config_readonly() or {}
-        return config.get("plugins", {}).get("entries", {}).get(PLUGIN_ID, {}).get("settings", {}).get(key)
+        return _load_hermes_config().get("plugins", {}).get("entries", {}).get(
+            PLUGIN_ID, {}).get("settings", {}).get(key)
     except Exception:  # pragma: no cover - an unreadable config grants no setting
         return None
 
@@ -1080,16 +1135,41 @@ def _relay_secret(name: str) -> str:
         return (os.environ.get(name) or "").strip()
 
 
-def _relay_api_key(settings: RelaySettings) -> str:
-    """Credential for the api_server chat route: a named peer's scoped key
-    (``relay_peer`` -> ``HERMES_PEER_<NAME>_KEY``, exactly what ``hermes peer``
-    resolves) when configured, else the gateway's own API_SERVER_KEY."""
-    if settings.peer:
-        env_name = f"HERMES_PEER_{settings.peer.upper().replace('-', '_')}_KEY"
-        key = _relay_secret(env_name)
-        if key:
-            return key
-    return _relay_secret("API_SERVER_KEY")
+def peer_key_for(peer: str) -> str:
+    """Credential for the peer route: the named peer's scoped key
+    (``HERMES_PEER_<NAME>_KEY``, exactly what ``hermes peer`` resolves),
+    falling back to the gateway's own API_SERVER_KEY. "" when nothing resolves."""
+    if not peer:
+        return ""
+    env_name = f"HERMES_PEER_{peer.upper().replace('-', '_')}_KEY"
+    return _relay_secret(env_name) or _relay_secret("API_SERVER_KEY")
+
+
+def select_delivery_route(settings: RelaySettings) -> tuple:
+    """Which route delivers, and with which credential: ``(route, key, reason)``.
+
+    ``route`` is ``"api_server"``, ``"peer"`` or ``""`` (not configured). The
+    api_server route is the GENERIC one — works for anyone who enabled the
+    gateway's api_server platform — so ``auto`` prefers it; ``peer`` needs a
+    registered bot peer (machine-specific setup). An explicitly picked route
+    that is unavailable stays unavailable (honest), it never silently falls
+    back to the other one."""
+    if settings.delivery == "api_server" or (settings.delivery == "auto" and settings.api_key):
+        if settings.api_key:
+            return "api_server", settings.api_key, ""
+        return "", "", ("relay.delivery=api_server but relay_api_key is empty — "
+                        "paste your gateway's API_SERVER_KEY into the plugin config "
+                        "(see the README's Enable delivery section)")
+    peer_key = peer_key_for(settings.peer)
+    if settings.delivery == "peer" or (settings.delivery == "auto" and settings.peer):
+        if peer_key:
+            return "peer", peer_key, ""
+        return "", "", ("relay.delivery=peer but no key resolves for "
+                        f"{settings.peer!r} — register the peer with `hermes peer add` "
+                        "and set HERMES_PEER_<NAME>_KEY")
+    return "", "", ("Delivery not configured — relay_enabled is on but no route is set up. "
+                    "Enable the api_server platform and paste its key into relay_api_key "
+                    "(README: Enable delivery), or register a bot peer (relay_peer).")
 
 
 def _post_session_chat(api_url: str, key: str, session_id: str, text: str) -> dict:
@@ -1138,10 +1218,9 @@ def deliver_relay_batch(session_id: str, text: str, settings: RelaySettings) -> 
     store rows); batching/debounce keeps the cost per burst, not per event."""
     if not session_id:
         return {"ok": False, "retryable": False, "error": "no destination session"}
-    key = _relay_api_key(settings)
-    if not key:
-        return {"ok": False, "retryable": False,
-                "error": "no relay credential (API_SERVER_KEY unset; no relay_peer key)"}
+    route, key, reason = select_delivery_route(settings)
+    if not route:
+        return {"ok": False, "retryable": False, "error": reason}
     return _post_session_chat(settings.api_url, key, session_id, text)
 
 
@@ -1343,18 +1422,25 @@ def ensure_relay_started() -> RelayWorker:
 
 @router.get("/relay")
 def relay_status():
-    """Relay diagnostics for the dashboard / operators: what it watches, where
-    it delivers, and whether the last tick was healthy."""
+    """Relay diagnostics for the dashboard / operators: what it watches, which
+    delivery route is active, and whether the last tick was healthy. When the
+    relay is enabled but no route resolves, ``delivery`` carries the honest
+    "not configured" state (with the reason) instead of a silent no-op."""
     worker = ensure_relay_started()
     settings = read_relay_settings()
+    route, _key, reason = select_delivery_route(settings)
     return {
         "ok": True,
         "enabled": settings.enabled,
         "overrideSession": settings.override_session,
         "apiUrl": settings.api_url,
         "peer": settings.peer,
-        "credential": ("peer" if settings.peer and _relay_api_key(settings)
-                       else ("api" if _relay_api_key(settings) else "none")),
+        "delivery": {
+            "mode": settings.delivery,
+            "route": route,
+            "configured": bool(route),
+            "reason": reason,
+        },
         "events": sorted(settings.events),
         "watching": worker.baselined,
         "delivered": worker.delivered_count,

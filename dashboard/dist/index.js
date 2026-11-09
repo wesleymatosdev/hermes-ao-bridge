@@ -24,6 +24,9 @@
   // Verified from the installed AO desktop app's own update feed
   // (OrchestratorInc/agent-orchestrator) — not a guessed link.
   const AO_APP_RELEASES_URL = "https://github.com/OrchestratorInc/agent-orchestrator/releases";
+  // Where the "Enable delivery" relay setup steps live — the anchor the
+  // delivery-not-configured banner points at.
+  const README_DELIVERY_URL = "https://github.com/wesleymatosdev/hermes-ao-bridge#enable-delivery";
   // One message for every "daemon is down, holding the last-known board"
   // surface: header banner, WS daemon_error frames, the first-load error state.
   const DAEMON_DOWN_MSG = "AO daemon unreachable — retrying…";
@@ -79,6 +82,26 @@
       return function () { alive = false; };
     }, []);
     return v;
+  }
+
+  // Relay diagnostics (v0.3.4+ backend): polled cheaply so the "delivery not
+  // configured" banner appears/disappears without a page reload. Best-effort —
+  // a failed diagnostics fetch just means no banner, and a pre-0.3.4 backend
+  // (no `delivery` in the payload) must never banner either.
+  function useRelayStatus() {
+    const [relay, setRelay] = useState(null);
+    useEffect(function () {
+      let alive = true;
+      function load() {
+        authedFetchJson(API + "/relay").then(function (body) {
+          if (alive) setRelay(body);
+        }).catch(function (_e) { /* diagnostics are optional surface */ });
+      }
+      load();
+      const t = window.setInterval(load, 30000);
+      return function () { alive = false; window.clearInterval(t); };
+    }, []);
+    return relay;
   }
 
   function harnessIconSrc(map, harness) {
@@ -803,6 +826,11 @@
     // version at all — also stale (pre-0.2.8 module behind this UI).
     const staleBackend = Boolean(manifestVersion && data
       && manifestVersion !== data.pluginVersion);
+    const relay = useRelayStatus();
+    // Honest, not silent: the relay is on but no route resolves (no pasted
+    // api_server key, no peer) — events would be dropped with nowhere to go.
+    const relayUnconfigured = Boolean(relay && relay.enabled
+      && relay.delivery && !relay.delivery.configured);
     // First run: the daemon has never answered on this browser (no cached
     // board state). Only a genuine "daemon unreachable" counts — any other
     // failure keeps the ordinary error surface.
@@ -1059,6 +1087,17 @@
               title: "Reload the dashboard page to pick up the updated plugin",
               onClick: function () { window.location.reload(); },
             }, "Reload"))
+        : null,
+      relayUnconfigured
+        ? h("div", { className: "ao-banner-row" },
+            h("span", { className: "ao-banner ao-banner-reload" },
+              "AO event relay is on, but delivery is not configured — "
+              + ((relay.delivery && relay.delivery.reason) || "no route is set up.")),
+            h("a", {
+              className: "ao-btn ao-btn-ghost",
+              href: README_DELIVERY_URL, target: "_blank", rel: "noreferrer",
+              title: "Setup steps: enable api_server, paste its key into the plugin config",
+            }, "Enable delivery"))
         : null,
       !loaded
         ? h("div", { className: "ao-loading" }, "Loading AO board…")

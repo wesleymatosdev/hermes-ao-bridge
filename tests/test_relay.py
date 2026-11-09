@@ -17,9 +17,15 @@ Wire truth (verified live, 2026-11-09):
 - AO orchestrator conversations run with cwd under
   ``<worktrees>/<project>/orchestrator/`` — the Hermes-side session marker.
 - The gateway api_server route takes ``{"message": text}`` with
-  ``Authorization: Bearer`` (peer key or API_SERVER_KEY), 401 on bad key.
+  ``Authorization: Bearer``, 401 on bad key (verified against the gateway
+  source and live on a scratch api_server instance).
 
 Contracts locked here:
+- route selection: auto = api_server (relay_api_key) first, then the peer
+  credential; an explicitly picked unavailable route stays unavailable;
+  neither available -> honest permanent failure, never a silent no-op. The
+  api_server route never touches the Hermes secret store — the key comes
+  from the pasted plugin config only.
 - report transitions relay once per (report id, state); repeatCount churn on
   the same state never re-relays; a state change does.
 - session transitions relay working -> idle / exited / terminated only; the
@@ -70,10 +76,12 @@ class FakeSettings:
     """RelaySettings stand-in for tests that don't exercise config parsing."""
 
     def __init__(self, override_session="", api_url="http://api.test",
-                 peer="relaybot", enabled=True):
+                 peer="", api_key="", delivery="auto", enabled=True):
         self.enabled = enabled
         self.override_session = override_session
         self.api_url = api_url
+        self.delivery = delivery
+        self.api_key = api_key
         self.peer = peer
         self.events = set(plugin_api.DEFAULT_RELAY_EVENTS)
 
@@ -288,32 +296,72 @@ class DestinationTests(unittest.TestCase):
         self.assertEqual(reason, "")
 
 
-class CredentialTests(unittest.TestCase):
-    def test_peer_key_wins_and_uses_hermes_secret_scope(self):
-        used = {}
+class RouteSelectionTests(unittest.TestCase):
+    """The two-tier route: api_server (generic — pasted API_SERVER_KEY) is
+    primary, the hermes-peer credential is the fallback enhancement, and
+    neither-available is an honest 'not configured', never a silent no-op."""
+
+    def test_auto_prefers_api_server_with_pasted_key(self):
+        settings = FakeSettings(api_key="pasted-k", peer="relaybot", delivery="auto")
+        with patch.object(plugin_api, "_relay_secret",
+                          side_effect=AssertionError("must not touch the secret store")):
+            route, key, reason = plugin_api.select_delivery_route(settings)
+        self.assertEqual(route, "api_server")
+        self.assertEqual(key, "pasted-k")
+        self.assertEqual(reason, "")
+
+    def test_auto_falls_back_to_peer_when_no_api_key(self):
+        settings = FakeSettings(peer="relaybot", api_key="", delivery="auto")
 
         def fake_secret(name, default=""):
-            used[name] = True
-            return {"HERMES_PEER_RELAYBOT_KEY": "peer-k", "API_SERVER_KEY": "admin-k"}.get(name, default)
+            return {"HERMES_PEER_RELAYBOT_KEY": "peer-k"}.get(name, default)
 
-        settings = FakeSettings(peer="relaybot")
         with patch.object(plugin_api, "_relay_secret", side_effect=fake_secret):
-            self.assertEqual(plugin_api._relay_api_key(settings), "peer-k")
-        self.assertIn("HERMES_PEER_RELAYBOT_KEY", used)
-        self.assertNotIn("API_SERVER_KEY", used)
+            route, key, reason = plugin_api.select_delivery_route(settings)
+        self.assertEqual(route, "peer")
+        self.assertEqual(key, "peer-k")
 
-    def test_falls_back_to_api_server_key(self):
-        settings = FakeSettings(peer="")
-        with patch.object(plugin_api, "_relay_secret", side_effect=lambda n, d="": {"API_SERVER_KEY": "admin-k"}.get(n, d)):
-            self.assertEqual(plugin_api._relay_api_key(settings), "admin-k")
+    def test_auto_with_neither_is_honestly_unconfigured(self):
+        settings = FakeSettings(peer="", api_key="", delivery="auto")
+        with patch.object(plugin_api, "_relay_secret", return_value=""):
+            route, key, reason = plugin_api.select_delivery_route(settings)
+        self.assertEqual(route, "")
+        self.assertFalse(bool(route))
+        self.assertIn("not configured", reason)
+        self.assertIn("Enable delivery", reason)
 
-    def test_no_credential_is_permanent_failure(self):
-        settings = FakeSettings(peer="")
+    def test_peer_key_hitting_the_secret_store_falls_back_to_api_server_key(self):
+        # The peer route keeps its original resolution: the named peer's
+        # scoped key first, then the gateway's own API_SERVER_KEY.
+        def fake_secret(name, default=""):
+            return {"API_SERVER_KEY": "admin-k"}.get(name, default)
+
+        with patch.object(plugin_api, "_relay_secret", side_effect=fake_secret):
+            self.assertEqual(plugin_api.peer_key_for("relaybot"), "admin-k")
+
+    def test_explicit_api_server_with_no_key_stays_unavailable(self):
+        settings = FakeSettings(api_key="", delivery="api_server")
+        with patch.object(plugin_api, "_relay_secret",
+                          side_effect=AssertionError("must not fall back silently")):
+            route, _key, reason = plugin_api.select_delivery_route(settings)
+        self.assertEqual(route, "")
+        self.assertIn("relay_api_key", reason)
+
+    def test_explicit_peer_without_a_key_stays_unavailable(self):
+        settings = FakeSettings(peer="ghost", delivery="peer")
+        with patch.object(plugin_api, "_relay_secret", return_value=""):
+            route, _key, reason = plugin_api.select_delivery_route(settings)
+        self.assertEqual(route, "")
+        self.assertIn("ghost", reason)
+
+    def test_unconfigured_delivery_is_a_permanent_failure(self):
+        settings = FakeSettings(peer="", api_key="", delivery="auto")
         with patch.object(plugin_api, "_relay_secret", return_value=""), \
              patch.object(plugin_api, "_post_session_chat") as post:
             result = plugin_api.deliver_relay_batch("s", "text", settings)
         self.assertFalse(result["ok"])
         self.assertFalse(result["retryable"])
+        self.assertIn("not configured", result["error"])
         post.assert_not_called()
 
 
@@ -325,9 +373,9 @@ class DeliveryTests(unittest.TestCase):
             recorded.update(api_url=api_url, key=key, session_id=session_id, text=text)
             return {"ok": True}
 
-        settings = FakeSettings(api_url="http://api.test", peer="relaybot")
-        with patch.object(plugin_api, "_relay_api_key", return_value="k"), \
-             patch.object(plugin_api, "_post_session_chat", side_effect=fake_post):
+        settings = FakeSettings(api_url="http://api.test", api_key="k",
+                                delivery="api_server")
+        with patch.object(plugin_api, "_post_session_chat", side_effect=fake_post):
             result = plugin_api.deliver_relay_batch("local-orch", "a\nb", settings)
         self.assertTrue(result["ok"])
         self.assertEqual(recorded["api_url"], "http://api.test")
@@ -357,11 +405,14 @@ class DeliveryTests(unittest.TestCase):
 
 
 class SettingsTests(unittest.TestCase):
-    def test_defaults_are_off_with_api_default_and_no_override(self):
-        with patch.object(plugin_api, "_config_raw", return_value=None):
+    def test_defaults_are_off_autodetect_url_and_no_override(self):
+        with patch.object(plugin_api, "_config_raw", return_value=None), \
+             patch.object(plugin_api, "detect_api_url", return_value=""):
             settings = plugin_api.read_relay_settings()
         self.assertFalse(settings.enabled)
         self.assertEqual(settings.override_session, "")
+        self.assertEqual(settings.delivery, "auto")
+        self.assertEqual(settings.api_key, "")
         self.assertEqual(settings.api_url, plugin_api.RELAY_API_URL_DEFAULT)
         self.assertEqual(settings.peer, "")
         self.assertEqual(settings.events, set(plugin_api.DEFAULT_RELAY_EVENTS))
@@ -374,6 +425,61 @@ class SettingsTests(unittest.TestCase):
         self.assertTrue(settings.enabled)
         self.assertEqual(settings.override_session, "local-abc")
         self.assertEqual(settings.events, {"report_done", "session_idle"})
+
+    def test_delivery_mode_parses_and_typo_coerces_to_auto(self):
+        with patch.object(plugin_api, "_config_raw", side_effect=lambda k: {
+            "relay_delivery": "api_server", "relay_api_key": "k"}.get(k)):
+            settings = plugin_api.read_relay_settings()
+        self.assertEqual(settings.delivery, "api_server")
+        self.assertEqual(settings.api_key, "k")
+        with patch.object(plugin_api, "_config_raw", side_effect=lambda k: {
+            "relay_delivery": "bogus"}.get(k)):
+            settings = plugin_api.read_relay_settings()
+        self.assertEqual(settings.delivery, "auto")
+
+    def test_api_url_explicit_wins_over_detection(self):
+        with patch.object(plugin_api, "_config_raw", side_effect=lambda k: {
+            "relay_api_url": "http://127.0.0.1:9999"}.get(k)), \
+             patch.object(plugin_api, "detect_api_url", return_value="http://127.0.0.1:7000"):
+            settings = plugin_api.read_relay_settings()
+        self.assertEqual(settings.api_url, "http://127.0.0.1:9999")
+
+    def test_api_url_detected_when_unset_falls_back_to_stock_default(self):
+        with patch.object(plugin_api, "_config_raw", return_value=None), \
+             patch.object(plugin_api, "detect_api_url", return_value="http://127.0.0.1:8700"):
+            settings = plugin_api.read_relay_settings()
+        self.assertEqual(settings.api_url, "http://127.0.0.1:8700")
+
+
+class DetectApiUrlTests(unittest.TestCase):
+    """URL auto-detection from Hermes config.yaml — the ADDRESS only, never
+    any credential."""
+
+    def _detect(self, config):
+        with patch.object(plugin_api, "_load_hermes_config", return_value=config):
+            return plugin_api.detect_api_url()
+
+    def test_platforms_block_port(self):
+        url = self._detect({"platforms": {"api_server": {"port": 9000}}})
+        self.assertEqual(url, "http://127.0.0.1:9000")
+
+    def test_wildcard_bind_reads_as_loopback(self):
+        url = self._detect({"platforms": {"api_server": {"host": "0.0.0.0", "port": 9000}}})
+        self.assertEqual(url, "http://127.0.0.1:9000")
+
+    def test_gateway_shorthand_block(self):
+        url = self._detect({"gateway": {"api_server": {"host": "192.168.1.5", "port": 8643}}})
+        self.assertEqual(url, "http://192.168.1.5:8643")
+
+    def test_no_api_server_block_is_empty(self):
+        self.assertEqual(self._detect({"platforms": {"telegram": {"enabled": True}}}), "")
+        self.assertEqual(self._detect({}), "")
+
+    def test_url_never_carries_a_credential(self):
+        url = self._detect({"platforms": {"api_server": {
+            "port": 8642, "key": "super-secret-key"}}})
+        self.assertEqual(url, "http://127.0.0.1:8642")
+        self.assertNotIn("super-secret-key", url)
 
 
 class PollOnceTests(unittest.TestCase):
@@ -406,28 +512,27 @@ class PollOnceTests(unittest.TestCase):
         worker, sessions, reports, ao, db = self._worker_and_fakes()
         reports.append(make_report("r1", state="done", session_id="s1"))
         delivered = []
-        with patch.object(plugin_api, "_relay_api_key", return_value="k"), \
-             patch.object(plugin_api, "_post_session_chat",
+        with patch.object(plugin_api, "_post_session_chat",
                           side_effect=lambda url, key, sid, text: delivered.append((sid, text)) or {"ok": True}):
-            worker.poll_once(ao, lambda t: None, settings=FakeSettings(), db=db)
+            worker.poll_once(ao, lambda t: None, settings=FakeSettings(api_key="k"), db=db)
             # Baseline poll: silent — enabling the relay must not flood any
             # conversation with the daemon's current state.
             self.assertEqual(delivered, [])
 
             reports.append(make_report("r2", state="checkpoint", session_id="s1"))
-            worker.poll_once(ao, lambda t: None, settings=FakeSettings(), db=db)
+            worker.poll_once(ao, lambda t: None, settings=FakeSettings(api_key="k"), db=db)
             self.assertEqual(len(delivered), 1)
             dest, text = delivered[0]
             self.assertEqual(dest, "local-orch")  # per-event resolution, not config
             self.assertIn("📍", text)
 
             # Same state again: nothing.
-            worker.poll_once(ao, lambda t: None, settings=FakeSettings(), db=db)
+            worker.poll_once(ao, lambda t: None, settings=FakeSettings(api_key="k"), db=db)
             self.assertEqual(len(delivered), 1)
 
             # Worker goes idle: session transition relays to the same place.
             sessions[1]["status"] = "idle"
-            worker.poll_once(ao, lambda t: None, settings=FakeSettings(), db=db)
+            worker.poll_once(ao, lambda t: None, settings=FakeSettings(api_key="k"), db=db)
             self.assertEqual(len(delivered), 2)
             self.assertIn("idle", delivered[1][1])
 
@@ -450,9 +555,8 @@ class PollOnceTests(unittest.TestCase):
         db._rows = []
         reports.append(make_report("r1", state="done", session_id="s1"))
         delivered = []
-        settings = FakeSettings(override_session="local-manual")
-        with patch.object(plugin_api, "_relay_api_key", return_value="k"), \
-             patch.object(plugin_api, "_post_session_chat",
+        settings = FakeSettings(override_session="local-manual", api_key="k")
+        with patch.object(plugin_api, "_post_session_chat",
                           side_effect=lambda url, key, sid, text: delivered.append(sid) or {"ok": True}):
             worker.poll_once(ao, lambda t: None, settings=settings, db=db)  # baseline
             reports.append(make_report("r2", state="done", session_id="s2"))
@@ -468,16 +572,16 @@ class PollOnceTests(unittest.TestCase):
             calls.append(sid)
             return {"ok": False, "retryable": True, "error": "gateway api unreachable"}
 
-        with patch.object(plugin_api, "_relay_api_key", return_value="k"):
-            with patch.object(plugin_api, "_post_session_chat", side_effect=flaky):
-                worker.poll_once(ao, lambda t: None, settings=FakeSettings(), db=db)  # baseline
-                reports.append(make_report("r2", state="done", session_id="s2"))
-                worker.poll_once(ao, lambda t: None, settings=FakeSettings(), db=db)
-                self.assertEqual(len(calls), 1)  # tried once, deferred
-            # Next tick, gateway healthy again: the deferred batch delivers.
-            with patch.object(plugin_api, "_post_session_chat",
-                              side_effect=lambda url, key, sid, text: calls.append(sid) or {"ok": True}):
-                worker.poll_once(ao, lambda t: None, settings=FakeSettings(), db=db)
+        settings = FakeSettings(api_key="k")
+        with patch.object(plugin_api, "_post_session_chat", side_effect=flaky):
+            worker.poll_once(ao, lambda t: None, settings=settings, db=db)  # baseline
+            reports.append(make_report("r2", state="done", session_id="s2"))
+            worker.poll_once(ao, lambda t: None, settings=settings, db=db)
+            self.assertEqual(len(calls), 1)  # tried once, deferred
+        # Next tick, gateway healthy again: the deferred batch delivers.
+        with patch.object(plugin_api, "_post_session_chat",
+                          side_effect=lambda url, key, sid, text: calls.append(sid) or {"ok": True}):
+            worker.poll_once(ao, lambda t: None, settings=settings, db=db)
         self.assertEqual(len(calls), 2)
         self.assertEqual(calls[1], "local-orch")
 

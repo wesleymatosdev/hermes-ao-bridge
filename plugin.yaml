@@ -1,5 +1,5 @@
 name: ao-bridge
-version: 0.3.5
+version: 0.3.6
 label: AO Bridge
 description: Agent Orchestrator bridge — a Kanban board over the local AO daemon (projects, sessions, spawn, send)
 author: Wesley Matos
@@ -24,11 +24,19 @@ config_schema:
     type: list
     default: []
     description: Event kinds to relay; empty means all (report_done, report_checkpoint, report_stuck, report_needs_input, session_idle, session_exited, session_terminated)
+  relay_delivery:
+    type: str
+    default: auto
+    description: Delivery route — auto (api_server when configured, else peer) | api_server | peer
   relay_api_url:
     type: str
-    default: http://127.0.0.1:8642
-    description: Gateway api_server base URL the relay delivers through (loopback)
+    default: ""
+    description: Gateway api_server base URL the relay delivers through; empty auto-detects from config.yaml api_server settings (loopback)
+  relay_api_key:
+    type: str
+    default: ""
+    description: Your gateway's API_SERVER_KEY, pasted here — authenticates the api_server delivery route (README: Enable delivery)
   relay_peer:
     type: str
     default: ""
-    description: Peer name whose HERMES_PEER_<NAME>_KEY authenticates delivery (scoped credential; falls back to API_SERVER_KEY when unset)
+    description: OPTIONAL enhancement — peer name whose HERMES_PEER_<NAME>_KEY authenticates delivery when no api_server key is set (falls back to API_SERVER_KEY)
