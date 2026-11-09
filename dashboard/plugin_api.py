@@ -24,10 +24,12 @@ AO wire contract (verified against the live daemon and the AO backend source):
 from __future__ import annotations
 
 import asyncio
+import calendar
 import hashlib
 import json
 import logging
 import os
+import sqlite3
 import threading
 import time
 import urllib.error
@@ -714,7 +716,7 @@ def detail_payload(ao: AOClient, session_id: str) -> dict:
     project_id = sess.get("projectId") or ""
     activity = sess.get("activity") or {}
     tools = tool_activities(conv)
-    return {
+    payload = {
         "ok": True,
         "session": {
             "id": sess.get("id"),
@@ -755,6 +757,8 @@ def detail_payload(ao: AOClient, session_id: str) -> dict:
         # never carries (the list row is static for a whole turn).
         "turnState": (turns[0].get("state") or "") if turns else "",
     }
+    attach_hermes_enrichment(payload, sess)
+    return payload
 
 
 @router.get("/sessions/{session_id}/detail")
@@ -765,6 +769,212 @@ def detail(session_id: str):
         return detail_payload(ao, session_id)
     except AOApiError as err:
         _raise_mapped(err)
+
+
+# ---------------------------------------------------------------------------
+# Hermes session-store enrichment (harness == "hermes" only)
+#
+# Parity audit (2026-11-09, sessions agent-orchestrator-172 + hermes-agent-31):
+# ACP delivers AO a lossy view of a hermes worker — command outputs capped at
+# a few hundred chars, oversized tool results degraded to the persisted-output
+# notice (hermes-agent-31: 116k chars of tool activity in AO vs 442k in the
+# Hermes store), and no session stats. Reasoning is already at parity.
+#
+# The backend runs inside the gateway process, so for harness=="hermes"
+# sessions it can re-read what Hermes actually stored — read-only, straight
+# sqlite against state.db (no Hermes imports beyond a path helper; the plugin
+# and the gateway share the machine in a normal install — that assumption is
+# the point, and a missing DB degrades to {"found": false}).
+#
+# The AO↔Hermes join (measured 52/60 recent sessions; the misses are sessions
+# that never produced a Hermes row): AO launches ``hermes acp`` with cwd
+# ``<daemon data root>/worktrees/<projectId>/<sessionId>`` (standalone:
+# ``…/worktrees/standalone/sessions/<sessionId>``), so the cwd suffix — not a
+# guessed timestamp correlation — is the key, narrowed by
+# started_at >= AO createdAt and most-recent-wins for resumed sessions.
+# ---------------------------------------------------------------------------
+
+HERMES_ACTIVITY_TAIL = 400
+HERMES_SLACK_SECONDS = 5.0
+
+
+def hermes_db_path() -> Path:
+    """The profile's state.db. ``AO_BRIDGE_STATE_DB`` overrides (tests,
+    non-standard installs); otherwise the Hermes home resolver, falling back
+    to the stock home when Hermes isn't importable (bare test harnesses)."""
+    env = (os.environ.get("AO_BRIDGE_STATE_DB") or "").strip()
+    if env:
+        return Path(env)
+    try:
+        from hermes_constants import get_hermes_home  # type: ignore
+        return Path(get_hermes_home()) / "state.db"
+    except Exception:
+        return Path.home() / ".hermes" / "state.db"
+
+
+def open_hermes_db():
+    """Read-only sqlite handle on state.db, or None when it's missing or
+    unopenable — enrichment is additive, never load-bearing."""
+    path = hermes_db_path()
+    if not path.is_file():
+        return None
+    try:
+        con = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        con.row_factory = sqlite3.Row
+        return con
+    except sqlite3.Error:
+        return None
+
+
+def _epoch_from_iso(value: str) -> float:
+    if not value:
+        return 0.0
+    try:
+        return calendar.timegm(time.strptime(value[:19], "%Y-%m-%dT%H:%M:%S"))
+    except (ValueError, OverflowError):
+        return 0.0
+
+
+def _iso_from_epoch(ts) -> str:
+    try:
+        return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(float(ts)))
+    except (TypeError, ValueError, OverflowError):
+        return ""
+
+
+def hermes_cwd_tail(project_id: str, session_id: str) -> str:
+    """The worktree-cwd suffix AO provisions for this session (audit: the
+    layout above). Empty project = standalone spawn."""
+    session_id = str(session_id or "")
+    if not session_id:
+        return ""
+    if project_id:
+        return f"/worktrees/{project_id}/{session_id}"
+    return f"/worktrees/standalone/sessions/{session_id}"
+
+
+def find_hermes_session(con, project_id: str, session_id: str,
+                        created_epoch: float) -> Optional[dict]:
+    """The Hermes session row behind an AO session: exact cwd-suffix match,
+    started at/after the AO session's creation (``%``/``_`` in ids are
+    escaped — LIKE metacharacters must not widen the match), most recent
+    wins (AO resumes mint a fresh Hermes row per launch). None = no join."""
+    tail = hermes_cwd_tail(project_id, session_id)
+    if not tail or con is None:
+        return None
+    pattern = "%" + tail.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    row = con.execute(
+        "SELECT id, cwd, started_at, ended_at, message_count, tool_call_count,"
+        " model, input_tokens, output_tokens, reasoning_tokens,"
+        " estimated_cost_usd, title"
+        " FROM sessions WHERE cwd LIKE ? ESCAPE '\\' AND started_at >= ?"
+        " ORDER BY started_at DESC LIMIT 1",
+        (pattern, created_epoch - HERMES_SLACK_SECONDS)).fetchone()
+    return dict(row) if row else None
+
+
+def _parse_tool_calls(raw) -> list:
+    if not raw:
+        return []
+    try:
+        calls = json.loads(raw) if isinstance(raw, str) else raw
+    except ValueError:
+        return []
+    if isinstance(calls, list):
+        return [c for c in calls if isinstance(c, dict)]
+    return []
+
+
+def hermes_enrichment(con, session_row: dict,
+                      tail: int = HERMES_ACTIVITY_TAIL) -> dict:
+    """Full-fidelity activities + session stats for one joined Hermes row.
+
+    Tool rows carry the exact ``tool_name`` and full output ACP truncates;
+    an assistant row's ``tool_calls`` args are joined to its result row by
+    ``tool_call_id``. Reasoning rides the assistant rows. User and plain
+    assistant text are left out — the AO transcript already carries them.
+    Bounded to the last ``tail`` items."""
+    rows = con.execute(
+        "SELECT role, content, tool_calls, tool_call_id, tool_name, timestamp,"
+        " reasoning, reasoning_content FROM messages"
+        " WHERE session_id = ? AND active = 1 ORDER BY timestamp, id",
+        (session_row["id"],)).fetchall()
+    results = {r["tool_call_id"]: dict(r) for r in rows
+               if r["role"] == "tool" and r["tool_call_id"]}
+    items: list = []
+    for r in rows:
+        at = _iso_from_epoch(r["timestamp"])
+        if r["role"] == "assistant":
+            text = r["reasoning"] or r["reasoning_content"] or ""
+            if text.strip():
+                shown, truncated = _bounded(str(text), TOOL_OUTPUT_MAX_CHARS)
+                items.append({"kind": "reasoning", "text": shown,
+                              "textTruncated": truncated,
+                              "preview": _thinking_preview(shown), "at": at})
+            for call in _parse_tool_calls(r["tool_calls"]):
+                result = results.get(str(call.get("id") or "")) or {}
+                output = str(result.get("content") or "")
+                output, out_trunc = _bounded(output, TOOL_OUTPUT_MAX_CHARS)
+                args = call.get("arguments")
+                if isinstance(args, dict):
+                    try:
+                        args = json.dumps(args, ensure_ascii=False, sort_keys=True)
+                    except (TypeError, ValueError):
+                        args = str(args)
+                args = str(args or "")
+                args, in_trunc = _bounded(args, TOOL_INPUT_MAX_CHARS)
+                items.append({"kind": "tool",
+                              "toolName": result.get("tool_name")
+                                          or str(call.get("name") or "tool"),
+                              "input": args, "inputTruncated": in_trunc,
+                              "output": output, "outputTruncated": out_trunc,
+                              "at": at})
+    total = len(items)
+    started = session_row.get("started_at")
+    ended = session_row.get("ended_at")
+    return {
+        "session": {
+            "model": session_row.get("model") or "",
+            "title": session_row.get("title") or "",
+            "startedAt": _iso_from_epoch(started),
+            "endedAt": _iso_from_epoch(ended),
+            "durationSeconds": (round(ended - started) if started and ended else None),
+            "messageCount": session_row.get("message_count"),
+            "toolCallCount": session_row.get("tool_call_count"),
+            "inputTokens": session_row.get("input_tokens"),
+            "outputTokens": session_row.get("output_tokens"),
+            "reasoningTokens": session_row.get("reasoning_tokens"),
+            "estimatedCostUsd": session_row.get("estimated_cost_usd"),
+        },
+        "activities": items[-tail:],
+        "activitiesTotal": total,
+        "activitiesTruncated": total > tail,
+    }
+
+
+def attach_hermes_enrichment(payload: dict, ao_session: dict) -> None:
+    """Add ``hermesEnriched`` to a detail payload. Any failure (no DB, no
+    join, unreadable row) degrades to ``{"found": false}`` — the AO-side
+    payload is already complete at that point, so enrichment can never break
+    the sheet."""
+    enriched: dict = {"found": False}
+    try:
+        if (ao_session.get("harness") or "") == "hermes":
+            con = open_hermes_db()
+            if con is not None:
+                try:
+                    row = find_hermes_session(
+                        con, str(ao_session.get("projectId") or ""),
+                        str(ao_session.get("id") or ""),
+                        _epoch_from_iso(str(ao_session.get("createdAt") or "")))
+                    if row is not None:
+                        merged = hermes_enrichment(con, row)
+                        enriched = {"found": True, "sessionId": row["id"], **merged}
+                finally:
+                    con.close()
+    except Exception as exc:  # a broken enrichment must not break the sheet
+        log.warning("ao-bridge hermes enrichment failed: %s", exc)
+    payload["hermesEnriched"] = enriched
 
 
 # ---------------------------------------------------------------------------
