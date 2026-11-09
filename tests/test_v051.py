@@ -122,6 +122,18 @@ class FrontendStateContractTest(unittest.TestCase):
         self.assertIn("if (activeOnly && applyActiveOnly && stateOf(c) !== \"working\") return false;",
                       js)
 
+    def test_orchestrator_strip_and_archive_are_not_active_only_gated(self):
+        # v0.8.3: the orchestrator strip must not hide under Active-only (the
+        # coordinators vanish the moment none is mid-turn), and the archive
+        # strip stays collapsed by default so 300 rows of history don't read
+        # as the board. Both persist/express their contract in index.js.
+        from pathlib import Path
+        js = (Path(__file__).resolve().parent.parent / "dashboard" / "dist" / "index.js").read_text()
+        self.assertIn("filterSession(c, { activeOnly: false, recency: false });",
+                      js)  # shared by matchesArchiveFilters AND matchesOrchFilters
+        self.assertIn('window.localStorage.getItem("ao-bridge.archExpanded")', js)
+        self.assertIn('"ao-bridge.archExpanded"', js)
+
 
 if __name__ == "__main__":
     unittest.main()

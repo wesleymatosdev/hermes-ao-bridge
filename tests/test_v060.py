@@ -581,6 +581,18 @@ class ArchiveStripTest(BoardRouteTestBase):
         self.assertIn("live1", ids)
         self.assertEqual(sorted(c["id"] for c in board["archived"]), ["dead1", "dead2"])
 
+    def test_terminated_orchestrators_join_the_archive_strip(self):
+        # v0.8.3: the archive predicate runs over ALL sessions (matching AO
+        # desktop's board grouping) — a terminated orchestrator is history,
+        # not a live coordinator lingering in the orchestrators strip.
+        self.ao.add_session(make_session("orch-live", status="idle", project_id="p1"))
+        self.ao.add_session(make_session("orch-dead", status="terminated", terminated=True))
+        self.ao.sessions_by_id["orch-live"]["kind"] = "orchestrator"
+        self.ao.sessions_by_id["orch-dead"]["kind"] = "orchestrator"
+        board = self.http.get("/api/plugins/ao-bridge/board").json()
+        self.assertEqual([c["id"] for c in board["orchestrators"]], ["orch-live"])
+        self.assertEqual([c["id"] for c in board["archived"]], ["orch-dead"])
+
     def test_archive_is_no_longer_a_column(self):
         board = self.http.get("/api/plugins/ao-bridge/board").json()
         self.assertNotIn("archive", [c["id"] for c in board["columns"]])

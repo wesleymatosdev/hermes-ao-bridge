@@ -816,6 +816,30 @@
 
 .ao-arch-title { color: var(--ao-c-archived); }
 
+/* Collapsed-by-default archive header (v0.8.3): the whole header row is the
+   toggle — chevron, title and count always visible, rows only when open. */
+.ao-arch-toggle {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 8px 12px 6px;
+  background: none;
+  border: none;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  text-align: left;
+}
+.ao-arch-toggle:hover .ao-arch-title { color: var(--ao-text-dim); }
+.ao-arch-chevron {
+  display: inline-block;
+  color: var(--ao-text-dim);
+  font-size: 10px;
+  transition: transform 120ms ease;
+}
+.ao-arch-chevron.is-open { transform: rotate(90deg); }
+
 .ao-arch-error {
   color: var(--ao-bad);
   overflow: hidden;

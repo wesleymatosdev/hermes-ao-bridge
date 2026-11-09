@@ -633,6 +633,20 @@
     const rows = props.archived;
     const [busyId, setBusyId] = useState(null);
     const [errById, setErrById] = useState({});
+    // Collapsed by default (v0.8.3): AO desktop's board keeps its archive as
+    // a collapsed drawer; ours rendered every row up top and the board read
+    // as "everything is archived". The count stays visible on the header.
+    const [expanded, setExpanded] = useState(function () {
+      try { return window.localStorage.getItem("ao-bridge.archExpanded") === "1"; }
+      catch (_e) { return false; }
+    });
+    function toggleExpanded() {
+      setExpanded(function (prev) {
+        const next = !prev;
+        try { window.localStorage.setItem("ao-bridge.archExpanded", next ? "1" : "0"); } catch (_e) {}
+        return next;
+      });
+    }
     function restore(row) {
       if (!window.confirm("Restore \"" + row.displayName + "\"? The session relaunches and re-enters the board.")) return;
       setBusyId(row.id); setErrById({});
@@ -649,11 +663,18 @@
         })
         .finally(function () { setBusyId(null); });
     }
-    return h("div", { className: "ao-orch-strip ao-arch-strip" },
-      h("div", { className: "ao-orch-head" },
+    return h("div", { className: "ao-orch-strip ao-arch-strip" + (expanded ? " is-expanded" : "") },
+      h("button", {
+        type: "button",
+        className: "ao-arch-toggle",
+        title: expanded ? "Collapse the archive" : "Show the archive (" + rows.length + " sessions)",
+        "aria-expanded": expanded,
+        onClick: toggleExpanded,
+      },
+        h("span", { className: "ao-arch-chevron" + (expanded ? " is-open" : "") }, "▸"),
         h("span", { className: "ao-orch-title ao-arch-title" }, "Archive"),
         h("span", { className: "ao-orch-count" }, rows.length)),
-      h("div", { className: "ao-orch-rows" },
+      expanded ? h("div", { className: "ao-orch-rows" },
         rows.map(function (c) {
           const err = errById[c.id];
           return h("div", {
@@ -685,7 +706,7 @@
                               className: "ao-chip ao-chip-pr ao-orch-open" })
               : null);
         })
-      )
+      ) : null
     );
   }
 
@@ -2117,11 +2138,23 @@
       });
     }, [data, matchesFilters]);
 
+    // Orchestrator strip: opts out of Active-only and the recency window
+    // (v0.8.3) — the coordinators are few and are the board's map of who is
+    // running what; gating them by live turn made the strip vanish entirely
+    // the moment no orchestrator happened to be mid-turn. Search and the
+    // dropdown filters still apply. Terminated orchestrators never render
+    // here: the backend routes them to the archive strip (belt-and-braces
+    // below for an older backend that still ships them in orchestrators).
+    const matchesOrchFilters = useCallback(function (c) {
+      return filterSession(c, { activeOnly: false, recency: false });
+    }, [filterSession]);
+
     const orchestrators = useMemo(function () {
       if (!data) return [];
       const list = (data.orchestrators || (data.cards || []).filter(function (c) {
         return (c.kind || "").toLowerCase() === "orchestrator";
-      })).filter(matchesFilters);
+      })).filter(function (c) { return stateOf(c) !== "archived"; })
+        .filter(matchesOrchFilters);
       // Live orchestrators first, then by recency — archived history sinks
       // to the bottom instead of burying the ones actually coordinating.
       list.sort(function (a, b) {
@@ -2133,13 +2166,17 @@
         return (b.updatedAt || "").localeCompare(a.updatedAt || "");
       });
       return list;
-    }, [data, matchesFilters]);
+    }, [data, matchesOrchFilters]);
 
-    // Archived (terminated) workers — the backend splits them out of `cards`
-    // the way it splits orchestrators. Most-recently-updated first.
+    // Archived sessions (predicate over ALL sessions — workers AND terminated
+    // orchestrators, matching AO desktop's archive grouping; older backends
+    // keep terminated orchestrators in `orchestrators`, folded in here).
     const archived = useMemo(function () {
       if (!data) return [];
-      const list = (data.archived || []).filter(matchesArchiveFilters);
+      const legacy = (data.orchestrators || []).filter(function (c) {
+        return stateOf(c) === "archived";
+      });
+      const list = (data.archived || []).concat(legacy).filter(matchesArchiveFilters);
       list.sort(function (a, b) {
         return (b.updatedAt || b.createdAt || "").localeCompare(a.updatedAt || a.createdAt || "");
       });

@@ -747,10 +747,14 @@ def board_snapshot(ao: Optional[AOClient] = None) -> dict:
     _attach_plans(all_cards, ao)
     workers = [c for c in all_cards if (c.get("kind") or "worker") != "orchestrator"]
     orchestrators = [c for c in all_cards if c.get("kind") == "orchestrator"]
-    # Archived workers (terminated) join the Archive strip, not a column —
-    # same split the orchestrators get, so the columns stay meaningful.
+    # The Archive strip is the archive predicate over ALL sessions, matching
+    # AO desktop (function He in its board adapter: kanbanColumn "archive" |
+    # isTerminated | status "terminated") — terminated orchestrators are
+    # history too, so they land here instead of lingering in the strip of
+    # live coordinators. Live orchestrators stay in ``orchestrators``.
+    archived = [c for c in all_cards if c.get("column") == "archive"]
     cards = [c for c in workers if c.get("column") != "archive"]
-    archived = [c for c in workers if c.get("column") == "archive"]
+    orchestrators = [c for c in orchestrators if c.get("column") != "archive"]
     archived.sort(key=lambda c: c.get("updatedAt") or c.get("createdAt") or "", reverse=True)
     by_column = {c: [] for c in COLUMN_ORDER}
     for card in cards:
