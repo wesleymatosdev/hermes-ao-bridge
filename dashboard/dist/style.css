@@ -1,26 +1,394 @@
-/* ao-bridge — nebula/galaxy dark theme, scoped under .ao-bridge */
+/* ao-bridge — theme layer.
+   Every component rule reads ONLY from the --ao-* custom properties declared
+   on .ao-bridge below; the base values ARE the original nebula/galaxy look
+   ("Nebula Classic", the default). The .ao-theme-* blocks re-point those
+   tokens to port the brand identities: waves-discovery, light-editorial,
+   dark-aurora, liquid-glass (the four brand-study pages) and air (derived
+   from air.inc's live CSS — see the block comment there).
+   Adding a theme = one token block here + an entry in THEMES (dist/index.js).
+   Hardcoded colors are allowed only inside token declarations and the
+   theme-picker swatches (which must show a theme's colors from inside a
+   DIFFERENT theme, so they cannot read that theme's variables). */
 
 .ao-bridge {
-  --ao-bg-deep: #070912;
-  --ao-bg-panel: rgba(16, 20, 38, 0.72);
-  --ao-bg-card: rgba(22, 27, 51, 0.66);
-  --ao-border: rgba(122, 132, 220, 0.22);
-  --ao-border-bright: rgba(140, 150, 255, 0.45);
-  --ao-text: #dfe3ff;
-  --ao-text-dim: #8b93c8;
-  --ao-accent: #7c6cff;
-  --ao-accent-2: #38bdf8;
-  --ao-good: #34d399;
-  --ao-warn: #fbbf24;
-  --ao-bad: #fb7185;
-  color: var(--ao-text);
-  min-height: 100%;
-  padding: 18px 22px 32px;
-  background:
+  /* --- page + surfaces --------------------------------------------------- */
+  --ao-page-bg:
     radial-gradient(1200px 600px at 15% -10%, rgba(124, 108, 255, 0.16), transparent 60%),
     radial-gradient(900px 500px at 90% 0%, rgba(56, 189, 248, 0.10), transparent 55%),
     radial-gradient(700px 700px at 50% 110%, rgba(167, 86, 255, 0.10), transparent 60%),
-    var(--ao-bg-deep);
+    #070912;
+  --ao-bg-panel: rgba(16, 20, 38, 0.72);
+  --ao-bg-card: rgba(22, 27, 51, 0.66);
+  --ao-bg-sheet: linear-gradient(180deg, rgba(24, 28, 54, 0.97), rgba(14, 17, 34, 0.97));
+  --ao-bg-input: rgba(9, 12, 26, 0.8);
+  --ao-bg-inset: rgba(9, 12, 26, 0.65);      /* expanded tool/thinking bodies */
+  --ao-bg-chip: rgba(124, 108, 255, 0.08);   /* chip wash */
+  --ao-bg-count: rgba(124, 108, 255, 0.14);  /* count-pill wash */
+  --ao-hover: rgba(124, 108, 255, 0.09);     /* row hover wash */
+  --ao-overlay-bg: rgba(4, 6, 14, 0.66);
+
+  /* backdrop-filter depth per surface. Cards deliberately have none: see the
+     .ao-theme-glass note — per-card backdrop-filter does not survive 300+. */
+  --ao-blur-panel: blur(6px);
+  --ao-blur-sheet: none;
+  --ao-overlay-blur: blur(3px);
+
+  /* --- text --------------------------------------------------------------- */
+  --ao-text: #dfe3ff;
+  --ao-text-dim: #8b93c8;
+
+  /* --- accent + status hues ------------------------------------------------ */
+  --ao-accent: #7c6cff;
+  --ao-accent-2: #38bdf8;                    /* links, running pulse, plan dot */
+  --ao-accent-3: #c4b5fd;                    /* harness chips */
+  --ao-accent-contrast: #0b0e1d;             /* text on accent fills */
+  --ao-good: #34d399;
+  --ao-warn: #fbbf24;
+  --ao-bad: #fb7185;
+  --ao-c-queued: #a5b4fc;
+  --ao-c-running: #6ee7ff;
+  --ao-c-review: #fbbf24;
+  --ao-c-blocked: #fb7185;
+  --ao-c-done: #34d399;
+  --ao-c-archived: #8b93c8;
+  --ao-header-fill: linear-gradient(90deg, #b7a9ff, #6ee7ff);
+  --ao-primary-fill: linear-gradient(135deg, rgba(124, 108, 255, 0.85), rgba(56, 189, 248, 0.7));
+
+  /* --- lines ---------------------------------------------------------------- */
+  --ao-border: rgba(122, 132, 220, 0.22);
+  --ao-border-bright: rgba(140, 150, 255, 0.45);
+
+  /* --- radii, shadows, type -------------------------------------------------- */
+  --ao-r-sm: 10px;   /* buttons, inputs, banners, tool bodies */
+  --ao-r-md: 12px;   /* cards */
+  --ao-r-lg: 14px;   /* columns, orchestrator strip */
+  --ao-r-xl: 16px;   /* sheet */
+  --ao-panel-shadow: none;
+  --ao-card-shadow: none;
+  --ao-sheet-shadow: 0 18px 60px rgba(0, 0, 0, 0.55);
+  --ao-font-display: inherit;
+
+  /* --- transcript bubbles ----------------------------------------------------- */
+  --ao-bubble-user-bg: linear-gradient(135deg, rgba(124, 108, 255, 0.35), rgba(56, 189, 248, 0.26));
+  --ao-bubble-user-border: color-mix(in srgb, var(--ao-accent) 50%, transparent);
+  --ao-bubble-user-fg: var(--ao-text);
+  --ao-bubble-worker-bg: color-mix(in srgb, var(--ao-good) 9%, transparent);
+  --ao-bubble-worker-border: color-mix(in srgb, var(--ao-good) 30%, transparent);
+  --ao-bubble-orch-bg: color-mix(in srgb, var(--ao-warn) 6%, transparent);
+  --ao-bubble-orch-border: color-mix(in srgb, var(--ao-warn) 45%, transparent);
+
+  color: var(--ao-text);
+  min-height: 100%;
+  padding: 18px 22px 32px;
+  background: var(--ao-page-bg);
+}
+
+/* Nebula Classic is the base token block above — nothing to override. */
+.ao-theme-nebula { }
+
+/* --- waves-discovery ---------------------------------------------------------
+   Dark neutral OKLCH surfaces, single rose accent, teal for anything live,
+   yellow for review, dense and flat (no blur, no glow). */
+.ao-theme-waves {
+  --ao-page-bg: oklch(0.145 0 0);
+  --ao-bg-panel: oklch(0.18 0 0);
+  --ao-bg-card: oklch(0.205 0 0);
+  --ao-bg-sheet: oklch(0.205 0 0);
+  --ao-bg-input: transparent;
+  --ao-bg-inset: oklch(0.178 0 0);
+  --ao-bg-chip: color-mix(in oklab, var(--ao-accent) 8%, transparent);
+  --ao-bg-count: oklch(0.269 0 0);
+  --ao-hover: oklch(0.269 0 0);
+  --ao-overlay-bg: oklch(0 0 0 / 40%);
+  --ao-blur-panel: none;
+  --ao-blur-sheet: none;
+  --ao-overlay-blur: none;
+
+  --ao-text: oklch(0.985 0 0);
+  --ao-text-dim: oklch(0.708 0 0);
+
+  --ao-accent: oklch(0.7 0.21 10);
+  --ao-accent-2: oklch(0.6 0.104 184.7);
+  --ao-accent-3: oklch(0.7 0.21 10);
+  --ao-accent-contrast: oklch(0.985 0 0);
+  --ao-good: oklch(0.6 0.104 184.7);
+  --ao-warn: oklch(0.837 0.164 84.43);
+  --ao-bad: oklch(0.704 0.191 22.216);
+  --ao-c-queued: oklch(0.708 0 0);
+  --ao-c-running: oklch(0.6 0.104 184.7);
+  --ao-c-review: oklch(0.837 0.164 84.43);
+  --ao-c-blocked: oklch(0.704 0.191 22.216);
+  --ao-c-done: oklch(0.72 0.12 160);
+  --ao-c-archived: oklch(0.708 0 0);
+  --ao-header-fill: oklch(0.7 0.21 10);
+  --ao-primary-fill: oklch(0.61 0.225 10);
+
+  --ao-border: oklch(1 0 0 / 10%);
+  --ao-border-bright: color-mix(in oklab, var(--ao-accent) 45%, var(--ao-border));
+
+  --ao-r-sm: 8px;
+  --ao-r-md: 8px;
+  --ao-r-lg: 10px;
+  --ao-r-xl: 14px;
+  --ao-sheet-shadow: 0 24px 60px oklch(0 0 0 / 45%);
+
+  --ao-bubble-user-bg: color-mix(in oklab, var(--ao-accent) 18%, var(--ao-bg-card));
+  --ao-bubble-user-border: color-mix(in oklab, var(--ao-accent) 30%, transparent);
+  --ao-bubble-worker-bg: oklch(0.269 0 0);
+  --ao-bubble-worker-border: transparent;
+  --ao-bubble-orch-bg: transparent;
+  --ao-bubble-orch-border: var(--ao-border);
+}
+
+/* --- light-editorial ----------------------------------------------------------
+   Paper surfaces, ink text, one vermilion accent, hairline rules, radius 0,
+   serif display voice. Statuses differ mostly by depth of the ink scale —
+   the vermilion is reserved for what is alive or blocking. */
+.ao-theme-editorial {
+  --ao-page-bg: #faf8f3;
+  --ao-bg-panel: #f2eee5;
+  --ao-bg-card: #ffffff;
+  --ao-bg-sheet: #faf8f3;
+  --ao-bg-input: #ffffff;
+  --ao-bg-inset: #f2eee5;
+  --ao-bg-chip: color-mix(in srgb, var(--ao-accent) 9%, transparent);
+  --ao-bg-count: color-mix(in srgb, var(--ao-accent) 13%, transparent);
+  --ao-hover: color-mix(in srgb, var(--ao-accent) 6%, transparent);
+  --ao-overlay-bg: rgba(26, 22, 17, 0.38);
+  --ao-blur-panel: none;
+  --ao-blur-sheet: none;
+  --ao-overlay-blur: none;
+
+  --ao-text: #1a1611;
+  --ao-text-dim: #6e675b;
+
+  --ao-accent: #b23a1d;
+  --ao-accent-2: #8e2d15;
+  --ao-accent-3: #8e2d15;
+  --ao-accent-contrast: #faf8f3;
+  --ao-good: #1a1611;
+  --ao-warn: #8e2d15;
+  --ao-bad: #b23a1d;
+  --ao-c-queued: #a79e8d;
+  --ao-c-running: #b23a1d;
+  --ao-c-review: #1a1611;
+  --ao-c-blocked: #8e2d15;
+  --ao-c-done: #6e675b;
+  --ao-c-archived: #a79e8d;
+  --ao-header-fill: #1a1611;
+  --ao-primary-fill: #1a1611;
+
+  --ao-border: #e4decf;
+  --ao-border-bright: #cfc8b6;
+
+  --ao-r-sm: 0;
+  --ao-r-md: 0;
+  --ao-r-lg: 0;
+  --ao-r-xl: 0;
+  --ao-sheet-shadow: 10px 10px 0 rgba(26, 22, 17, 0.18);
+  --ao-font-display: "Didot", "Bodoni 72", "Playfair Display", "Iowan Old Style", Georgia, serif;
+
+  --ao-bubble-user-bg: #1a1611;
+  --ao-bubble-user-border: #1a1611;
+  --ao-bubble-user-fg: #faf8f3;
+  --ao-bubble-worker-bg: #ffffff;
+  --ao-bubble-worker-border: #cfc8b6;
+  --ao-bubble-orch-bg: #f7e9e2;
+  --ao-bubble-orch-border: #b23a1d;
+}
+
+/* --- dark-aurora -----------------------------------------------------------------
+   Near-black glass: deep gradient panels behind a teal→indigo→magenta aurora
+   wash, thin white lines, gradient accent fills. */
+.ao-theme-aurora {
+  --ao-page-bg:
+    radial-gradient(42% 34% at 14% 8%, rgba(45, 212, 191, 0.10), transparent 62%),
+    radial-gradient(46% 40% at 86% 14%, rgba(129, 140, 248, 0.12), transparent 64%),
+    radial-gradient(50% 44% at 68% 96%, rgba(232, 121, 249, 0.07), transparent 66%),
+    #05060b;
+  --ao-bg-panel: linear-gradient(180deg, rgba(17, 21, 34, 0.78), rgba(10, 13, 22, 0.72));
+  --ao-bg-card: linear-gradient(180deg, rgba(255, 255, 255, 0.045), rgba(255, 255, 255, 0.016));
+  --ao-bg-sheet: linear-gradient(180deg, rgba(17, 21, 34, 0.9), rgba(10, 13, 22, 0.88));
+  --ao-bg-input: rgba(255, 255, 255, 0.04);
+  --ao-bg-inset: rgba(3, 4, 9, 0.4);
+  --ao-bg-chip: rgba(255, 255, 255, 0.05);
+  --ao-bg-count: rgba(255, 255, 255, 0.05);
+  --ao-hover: rgba(255, 255, 255, 0.055);
+  --ao-overlay-bg: rgba(3, 4, 9, 0.62);
+  --ao-blur-panel: blur(20px);
+  --ao-blur-sheet: blur(30px);
+  --ao-overlay-blur: blur(6px);
+
+  --ao-text: #e9edf6;
+  --ao-text-dim: #a7b0c4;
+
+  --ao-accent: #818cf8;
+  --ao-accent-2: #2dd4bf;
+  --ao-accent-3: #c4b5fd;
+  --ao-accent-contrast: #ffffff;
+  --ao-good: #5eead4;
+  --ao-warn: #fbbf24;
+  --ao-bad: #fda4af;
+  --ao-c-queued: #a7b0c4;
+  --ao-c-running: #2dd4bf;
+  --ao-c-review: #fbbf24;
+  --ao-c-blocked: #fda4af;
+  --ao-c-done: #5eead4;
+  --ao-c-archived: #6d7893;
+  --ao-header-fill: linear-gradient(120deg, #2dd4bf, #818cf8 52%, #e879f9);
+  --ao-primary-fill: linear-gradient(135deg, #2dd4bf, #818cf8 52%, #e879f9);
+
+  --ao-border: rgba(255, 255, 255, 0.08);
+  --ao-border-bright: rgba(129, 140, 248, 0.4);
+
+  --ao-r-sm: 9px;
+  --ao-r-md: 12px;
+  --ao-r-lg: 18px;
+  --ao-r-xl: 20px;
+  --ao-sheet-shadow: 0 40px 110px -20px rgba(0, 0, 0, 0.85), 0 0 70px -26px rgba(129, 140, 248, 0.4);
+
+  --ao-bubble-user-bg: linear-gradient(120deg, #2dd4bf, #818cf8 52%, #e879f9);
+  --ao-bubble-user-border: rgba(255, 255, 255, 0.18);
+  --ao-bubble-user-fg: #ffffff;
+  --ao-bubble-worker-bg: linear-gradient(180deg, rgba(255, 255, 255, 0.07), rgba(255, 255, 255, 0.03));
+  --ao-bubble-worker-border: rgba(163, 190, 255, 0.16);
+  --ao-bubble-orch-bg: rgba(255, 255, 255, 0.02);
+  --ao-bubble-orch-border: rgba(255, 255, 255, 0.14);
+}
+
+/* --- liquid-glass ----------------------------------------------------------------- */
+/* Frosted translucent panels over a colorful ambient backdrop, specular
+   inset edges, generous radii. PERF NOTE: backdrop-filter lives only on the
+   few big surfaces (columns, strip, sheet, overlay) — NOT on cards. A card
+   carries the glass tint + specular edge; the column behind it is already
+   frosted, so per-card backdrop-filter (blur(28px) × 300+ cards, as in the
+   study page) re-filters on every scroll frame and janks the board. */
+.ao-theme-glass {
+  --ao-page-bg:
+    radial-gradient(circle at 12% 10%, rgba(109, 92, 255, 0.55), transparent 38%),
+    radial-gradient(circle at 88% 8%, rgba(255, 95, 162, 0.45), transparent 38%),
+    radial-gradient(circle at 50% 88%, rgba(31, 200, 255, 0.42), transparent 42%),
+    radial-gradient(circle at 92% 82%, rgba(255, 194, 95, 0.30), transparent 36%),
+    radial-gradient(circle at 45% 40%, rgba(92, 242, 192, 0.22), transparent 40%),
+    #10142e;
+  --ao-bg-panel: rgba(28, 34, 66, 0.30);
+  --ao-bg-card: rgba(20, 24, 48, 0.42);
+  --ao-bg-sheet: rgba(16, 20, 42, 0.58);
+  --ao-bg-input: rgba(255, 255, 255, 0.08);
+  --ao-bg-inset: rgba(16, 20, 42, 0.45);
+  --ao-bg-chip: rgba(255, 255, 255, 0.09);
+  --ao-bg-count: rgba(255, 255, 255, 0.12);
+  --ao-hover: rgba(255, 255, 255, 0.10);
+  --ao-overlay-bg: rgba(6, 8, 22, 0.5);
+  --ao-blur-panel: blur(28px) saturate(180%);
+  --ao-blur-sheet: blur(40px) saturate(200%);
+  --ao-overlay-blur: blur(10px) saturate(120%);
+
+  --ao-text: rgba(255, 255, 255, 0.97);
+  --ao-text-dim: rgba(255, 255, 255, 0.78);
+
+  --ao-accent: #8b5cf6;
+  --ao-accent-2: #7cc4ff;
+  --ao-accent-3: #7cc4ff;
+  --ao-accent-contrast: #ffffff;
+  --ao-good: #3ad97e;
+  --ao-warn: #ffb340;
+  --ao-bad: #ff5d55;
+  --ao-c-queued: #9aa4b8;
+  --ao-c-running: #7cc4ff;
+  --ao-c-review: #ffb340;
+  --ao-c-blocked: #ff5d55;
+  --ao-c-done: #3ad97e;
+  --ao-c-archived: rgba(255, 255, 255, 0.45);
+  --ao-header-fill: linear-gradient(90deg, #7cc4ff, #8b5cf6);
+  --ao-primary-fill: linear-gradient(145deg, rgba(124, 196, 255, 0.9), rgba(139, 92, 246, 0.9));
+
+  --ao-border: rgba(255, 255, 255, 0.14);
+  --ao-border-bright: rgba(255, 255, 255, 0.26);
+
+  --ao-r-sm: 12px;
+  --ao-r-md: 20px;
+  --ao-r-lg: 26px;
+  --ao-r-xl: 30px;
+  --ao-panel-shadow: 0 10px 34px rgba(4, 6, 18, 0.35), inset 0 1px 0 rgba(255, 255, 255, 0.22);
+  --ao-card-shadow: 0 8px 24px rgba(4, 6, 18, 0.35), inset 0 1px 0 rgba(255, 255, 255, 0.28);
+  --ao-sheet-shadow: 0 40px 90px rgba(4, 6, 18, 0.6), inset 0 1px 0 rgba(255, 255, 255, 0.35);
+
+  --ao-bubble-user-bg: rgba(10, 108, 240, 0.34);
+  --ao-bubble-user-border: rgba(124, 196, 255, 0.32);
+  --ao-bubble-worker-bg: rgba(255, 255, 255, 0.12);
+  --ao-bubble-worker-border: rgba(255, 255, 255, 0.14);
+  --ao-bubble-orch-bg: rgba(139, 92, 246, 0.24);
+  --ao-bubble-orch-border: rgba(196, 160, 255, 0.34);
+}
+
+/* --- air ---------------------------------------------------------------------------
+   LIGHT sky-glass — the pale counterpart of liquid-glass (which stays dark
+   refraction). Feel-spec distilled by Wesley from real air.inc frames: the
+   page sits on a bright sky-blue gradient with soft clouds; panels are
+   translucent WHITE frosted glass; dark ink text (never white-on-glass);
+   ONE vivid lime accent marks what is alive (working cards, running dots,
+   plan pulse) while idle stays pale; soft diffuse shadows; calm hover-lift;
+   generous radii. The sky/cloud texture is static gradients only (no
+   animation, no per-card backdrop-filter) — performance-safe like glass.
+   Provenance: atmosphere from air.inc frames (not its literal marketing
+   tokens); the earlier charcoal read of air.inc's site CSS was superseded
+   by Wesley's frame analysis on 2026-11-09. */
+.ao-theme-air {
+  --ao-page-bg:
+    radial-gradient(55% 28% at 18% 12%, rgba(255, 255, 255, 0.85), transparent 65%),
+    radial-gradient(45% 22% at 82% 22%, rgba(255, 255, 255, 0.65), transparent 60%),
+    radial-gradient(50% 25% at 60% 78%, rgba(255, 255, 255, 0.5), transparent 65%),
+    linear-gradient(180deg, #9ccdf3 0%, #c3e2f8 45%, #e9f4fd 100%);
+  --ao-bg-panel: rgba(255, 255, 255, 0.42);
+  --ao-bg-card: rgba(255, 255, 255, 0.58);
+  --ao-bg-sheet: rgba(255, 255, 255, 0.68);
+  --ao-bg-input: rgba(255, 255, 255, 0.6);
+  --ao-bg-inset: rgba(20, 50, 90, 0.06);
+  --ao-bg-chip: rgba(255, 255, 255, 0.55);
+  --ao-bg-count: rgba(20, 90, 170, 0.1);
+  --ao-hover: rgba(20, 90, 170, 0.08);
+  --ao-overlay-bg: rgba(120, 170, 215, 0.4);
+  --ao-blur-panel: blur(14px);
+  --ao-blur-sheet: blur(24px);
+  --ao-overlay-blur: blur(8px);
+
+  --ao-text: #1c2a3a;
+  --ao-text-dim: #55677c;
+
+  --ao-accent: #84cc16;                      /* the ONE vivid accent: lime */
+  --ao-accent-2: #4d7c0f;                    /* lime for text-bearing surfaces (links, plan count) */
+  --ao-accent-3: #0369a1;                    /* harness chips: sky-blue ink */
+  --ao-accent-contrast: #173300;
+  --ao-good: #15803d;
+  --ao-warn: #b45309;
+  --ao-bad: #dc2626;
+  --ao-c-queued: #55677c;
+  --ao-c-running: #65a30d;
+  --ao-c-review: #b45309;
+  --ao-c-blocked: #dc2626;
+  --ao-c-done: #15803d;
+  --ao-c-archived: #8496aa;
+  --ao-header-fill: linear-gradient(90deg, #0c4a8e, #0284c7);
+  --ao-primary-fill: #a3e635;
+
+  --ao-border: rgba(25, 60, 105, 0.16);
+  --ao-border-bright: rgba(25, 60, 105, 0.32);
+
+  --ao-r-sm: 10px;
+  --ao-r-md: 16px;
+  --ao-r-lg: 22px;
+  --ao-r-xl: 28px;
+  --ao-panel-shadow: 0 12px 32px rgba(30, 60, 100, 0.12);
+  --ao-card-shadow: 0 6px 20px rgba(30, 60, 100, 0.1);
+  --ao-sheet-shadow: 0 30px 80px rgba(30, 60, 100, 0.25);
+
+  --ao-bubble-user-bg: rgba(163, 230, 53, 0.32);
+  --ao-bubble-user-border: rgba(101, 163, 13, 0.45);
+  --ao-bubble-worker-bg: rgba(255, 255, 255, 0.65);
+  --ao-bubble-worker-border: rgba(25, 60, 105, 0.15);
+  --ao-bubble-orch-bg: rgba(2, 132, 199, 0.08);
+  --ao-bubble-orch-border: rgba(2, 132, 199, 0.4);
 }
 
 /* --- header ------------------------------------------------------------- */
@@ -42,10 +410,11 @@
 }
 
 .ao-header-name {
+  font-family: var(--ao-font-display);
   font-size: 20px;
   font-weight: 700;
   letter-spacing: 0.04em;
-  background: linear-gradient(90deg, #b7a9ff, #6ee7ff);
+  background: var(--ao-header-fill);
   -webkit-background-clip: text;
   background-clip: text;
   color: transparent;
@@ -86,9 +455,10 @@
 .ao-column {
   background: var(--ao-bg-panel);
   border: 1px solid var(--ao-border);
-  border-radius: 14px;
+  border-radius: var(--ao-r-lg);
   min-height: 220px;
-  backdrop-filter: blur(6px);
+  box-shadow: var(--ao-panel-shadow);
+  backdrop-filter: var(--ao-blur-panel);
 }
 
 .ao-column-head {
@@ -100,12 +470,12 @@
   border-bottom: 1px solid var(--ao-border);
 }
 
-.ao-column-queued .ao-column-label { color: #a5b4fc; }
-.ao-column-running .ao-column-label { color: #6ee7ff; }
-.ao-column-review .ao-column-label { color: #fbbf24; }
-.ao-column-blocked .ao-column-label { color: #fb7185; }
-.ao-column-done .ao-column-label { color: #34d399; }
-.ao-column-archive .ao-column-label { color: #8b93c8; }
+.ao-column-queued .ao-column-label { color: var(--ao-c-queued); }
+.ao-column-running .ao-column-label { color: var(--ao-c-running); }
+.ao-column-review .ao-column-label { color: var(--ao-c-review); }
+.ao-column-blocked .ao-column-label { color: var(--ao-c-blocked); }
+.ao-column-done .ao-column-label { color: var(--ao-c-done); }
+.ao-column-archive .ao-column-label { color: var(--ao-c-archived); }
 .ao-column-archive .ao-column-head { cursor: pointer; }
 
 .ao-column-label {
@@ -118,7 +488,7 @@
 .ao-column-count {
   font-size: 11px;
   color: var(--ao-text-dim);
-  background: rgba(124, 108, 255, 0.14);
+  background: var(--ao-bg-count);
   border: 1px solid var(--ao-border);
   border-radius: 999px;
   padding: 1px 8px;
@@ -147,11 +517,12 @@
 .ao-card {
   background: var(--ao-bg-card);
   border: 1px solid var(--ao-border);
-  border-radius: 12px;
+  border-radius: var(--ao-r-md);
   padding: 10px 12px;
   display: flex;
   flex-direction: column;
   gap: 8px;
+  box-shadow: var(--ao-card-shadow);
   transition: border-color 120ms ease, transform 120ms ease;
 }
 
@@ -160,12 +531,12 @@
   transform: translateY(-1px);
 }
 
-.ao-card-running { border-left: 3px solid rgba(110, 231, 255, 0.55); }
-.ao-card-queued { border-left: 3px solid rgba(165, 180, 252, 0.55); }
-.ao-card-review { border-left: 3px solid rgba(251, 191, 36, 0.55); }
-.ao-card-blocked { border-left: 3px solid rgba(251, 113, 133, 0.55); }
-.ao-card-done { border-left: 3px solid rgba(52, 211, 153, 0.55); }
-.ao-card-archive { opacity: 0.72; border-left: 3px solid rgba(139, 147, 200, 0.4); }
+.ao-card-running { border-left: 3px solid color-mix(in srgb, var(--ao-c-running) 55%, transparent); }
+.ao-card-queued { border-left: 3px solid color-mix(in srgb, var(--ao-c-queued) 55%, transparent); }
+.ao-card-review { border-left: 3px solid color-mix(in srgb, var(--ao-c-review) 55%, transparent); }
+.ao-card-blocked { border-left: 3px solid color-mix(in srgb, var(--ao-c-blocked) 55%, transparent); }
+.ao-card-done { border-left: 3px solid color-mix(in srgb, var(--ao-c-done) 55%, transparent); }
+.ao-card-archive { opacity: 0.72; border-left: 3px solid color-mix(in srgb, var(--ao-c-archived) 40%, transparent); }
 
 .ao-card-top {
   display: flex;
@@ -177,8 +548,8 @@
 .ao-card-project {
   font-size: 11px;
   color: var(--ao-accent-2);
-  background: rgba(56, 189, 248, 0.10);
-  border: 1px solid rgba(56, 189, 248, 0.25);
+  background: color-mix(in srgb, var(--ao-accent-2) 10%, transparent);
+  border: 1px solid color-mix(in srgb, var(--ao-accent-2) 25%, transparent);
   border-radius: 999px;
   padding: 1px 8px;
   max-width: 60%;
@@ -193,6 +564,7 @@
 }
 
 .ao-card-name {
+  font-family: var(--ao-font-display);
   font-size: 14px;
   font-weight: 600;
   overflow: hidden;
@@ -219,39 +591,39 @@
   border: 1px solid var(--ao-border);
   border-radius: 999px;
   padding: 1px 8px;
-  background: rgba(124, 108, 255, 0.08);
+  background: var(--ao-bg-chip);
   max-width: 180px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.ao-chip-harness { color: #c4b5fd; border-color: rgba(196, 181, 253, 0.3); }
-.ao-chip-status { color: #dfe3ff; }
+.ao-chip-harness { color: var(--ao-accent-3); border-color: color-mix(in srgb, var(--ao-accent-3) 30%, transparent); }
+.ao-chip-status { color: var(--ao-text); }
 .ao-chip-branch { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 
 /* Honest activity-state chips (v0.5.1): AO's displayStatus nuance moves to
    the tooltip; the chip itself says what the session is actually doing.
    Working pulses (the one "active" look), everything else rests. */
 .ao-chip-state-working {
-  color: #6ee7ff;
-  border-color: rgba(110, 231, 255, 0.45);
-  background: rgba(56, 189, 248, 0.10);
+  color: var(--ao-c-running);
+  border-color: color-mix(in srgb, var(--ao-c-running) 45%, transparent);
+  background: color-mix(in srgb, var(--ao-c-running) 10%, transparent);
   animation: ao-chip-pulse 1.6s ease-in-out infinite;
 }
 .ao-chip-state-idle {
-  color: #8b93c8;
-  border-color: rgba(139, 147, 200, 0.30);
-  background: rgba(139, 147, 200, 0.08);
+  color: var(--ao-c-archived);
+  border-color: color-mix(in srgb, var(--ao-c-archived) 30%, transparent);
+  background: color-mix(in srgb, var(--ao-c-archived) 8%, transparent);
 }
 .ao-chip-state-awaiting_pr {
-  color: #fbbf24;
-  border-color: rgba(251, 191, 36, 0.35);
-  background: rgba(251, 191, 36, 0.08);
+  color: var(--ao-warn);
+  border-color: color-mix(in srgb, var(--ao-warn) 35%, transparent);
+  background: color-mix(in srgb, var(--ao-warn) 8%, transparent);
 }
 .ao-chip-state-archived {
-  color: #6b7196;
-  border-color: rgba(107, 113, 150, 0.30);
+  color: color-mix(in srgb, var(--ao-c-archived) 80%, transparent);
+  border-color: color-mix(in srgb, var(--ao-c-archived) 30%, transparent);
   background: transparent;
 }
 @keyframes ao-chip-pulse {
@@ -273,12 +645,12 @@
 .ao-orch-split { flex: 1; text-align: right; }
 
 .ao-chip-pr {
-  color: #6ee7ff;
-  border-color: rgba(110, 231, 255, 0.35);
+  color: var(--ao-accent-2);
+  border-color: color-mix(in srgb, var(--ao-accent-2) 35%, transparent);
   text-decoration: none;
   cursor: pointer;
 }
-.ao-chip-pr:hover { background: rgba(110, 231, 255, 0.12); }
+.ao-chip-pr:hover { background: color-mix(in srgb, var(--ao-accent-2) 12%, transparent); }
 
 .ao-card-error {
   font-size: 11px;
@@ -300,8 +672,9 @@
   margin-bottom: 14px;
   background: var(--ao-bg-panel);
   border: 1px solid var(--ao-border);
-  border-radius: 14px;
-  backdrop-filter: blur(6px);
+  border-radius: var(--ao-r-lg);
+  box-shadow: var(--ao-panel-shadow);
+  backdrop-filter: var(--ao-blur-panel);
 }
 
 .ao-orch-head {
@@ -316,13 +689,13 @@
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.08em;
-  color: #a5b4fc;
+  color: var(--ao-c-queued);
 }
 
 .ao-orch-count {
   font-size: 11px;
   color: var(--ao-text-dim);
-  background: rgba(124, 108, 255, 0.14);
+  background: var(--ao-bg-count);
   border: 1px solid var(--ao-border);
   border-radius: 999px;
   padding: 1px 8px;
@@ -348,7 +721,7 @@
   cursor: pointer;
   min-width: 0;
 }
-.ao-orch-row:hover { background: rgba(124, 108, 255, 0.10); }
+.ao-orch-row:hover { background: var(--ao-hover); }
 
 .ao-orch-dot {
   flex: none;
@@ -358,20 +731,20 @@
 }
 .ao-orch-dot-working {
   background: var(--ao-accent-2);
-  box-shadow: 0 0 8px rgba(56, 189, 248, 0.9);
+  box-shadow: 0 0 8px color-mix(in srgb, var(--ao-accent-2) 90%, transparent);
   animation: ao-orch-pulse 1.6s ease-in-out infinite;
 }
 /* v0.5.1 honest dots: idle is muted gray — green read as "active" for
    finished sessions. awaiting PR glows amber; archived dims out. */
 .ao-orch-dot-idle {
-  background: rgba(139, 147, 200, 0.55);
+  background: color-mix(in srgb, var(--ao-c-archived) 55%, transparent);
 }
 .ao-orch-dot-awaiting_pr {
-  background: #fbbf24;
-  box-shadow: 0 0 6px rgba(251, 191, 36, 0.45);
+  background: var(--ao-warn);
+  box-shadow: 0 0 6px color-mix(in srgb, var(--ao-warn) 45%, transparent);
 }
 .ao-orch-dot-archived {
-  background: rgba(139, 147, 200, 0.30);
+  background: color-mix(in srgb, var(--ao-c-archived) 30%, transparent);
 }
 @keyframes ao-orch-pulse {
   0%, 100% { opacity: 1; }
@@ -391,8 +764,8 @@
   flex: none;
   font-size: 10.5px;
   color: var(--ao-accent-2);
-  background: rgba(56, 189, 248, 0.10);
-  border: 1px solid rgba(56, 189, 248, 0.25);
+  background: color-mix(in srgb, var(--ao-accent-2) 10%, transparent);
+  border: 1px solid color-mix(in srgb, var(--ao-accent-2) 25%, transparent);
   border-radius: 999px;
   padding: 1px 8px;
   overflow: hidden;
@@ -422,7 +795,7 @@
 /* Same strip anatomy as the orchestrators; tint marks the difference (this is
    history, not coordination) and the row carries the Restore action. */
 
-.ao-arch-title { color: #8b93c8; }
+.ao-arch-title { color: var(--ao-c-archived); }
 
 .ao-arch-error {
   color: var(--ao-bad);
@@ -437,7 +810,7 @@
 
 .ao-btn {
   font-size: 12.5px;
-  border-radius: 10px;
+  border-radius: var(--ao-r-sm);
   border: 1px solid var(--ao-border);
   background: var(--ao-bg-panel);
   color: var(--ao-text);
@@ -450,9 +823,9 @@
 .ao-btn:disabled { opacity: 0.5; cursor: default; }
 
 .ao-btn-primary {
-  background: linear-gradient(135deg, rgba(124, 108, 255, 0.85), rgba(56, 189, 248, 0.7));
+  background: var(--ao-primary-fill);
   border-color: transparent;
-  color: #0b0e1d;
+  color: var(--ao-accent-contrast);
   font-weight: 700;
 }
 .ao-btn-primary:hover { filter: brightness(1.1); }
@@ -461,22 +834,22 @@
 
 .ao-btn-danger {
   color: var(--ao-bad);
-  border-color: rgba(251, 113, 133, 0.4);
+  border-color: color-mix(in srgb, var(--ao-bad) 40%, transparent);
 }
-.ao-btn-danger:hover { background: rgba(251, 113, 133, 0.12); }
+.ao-btn-danger:hover { background: color-mix(in srgb, var(--ao-bad) 12%, transparent); }
 
 /* --- banners, sheets ------------------------------------------------------ */
 
 .ao-banner {
   font-size: 12px;
-  border-radius: 10px;
+  border-radius: var(--ao-r-sm);
   padding: 5px 10px;
 }
 
 .ao-banner-error {
   color: var(--ao-bad);
-  border: 1px solid rgba(251, 113, 133, 0.4);
-  background: rgba(251, 113, 133, 0.08);
+  border: 1px solid color-mix(in srgb, var(--ao-bad) 40%, transparent);
+  background: color-mix(in srgb, var(--ao-bad) 8%, transparent);
 }
 
 /* Plugin-updated skew notice: the in-process backend is older than the UI.
@@ -490,9 +863,9 @@
 
 .ao-banner-reload {
   flex: 1;
-  color: var(--ao-warn, #fbbf24);
-  border: 1px solid rgba(251, 191, 36, 0.45);
-  background: rgba(251, 191, 36, 0.08);
+  color: var(--ao-warn);
+  border: 1px solid color-mix(in srgb, var(--ao-warn) 45%, transparent);
+  background: color-mix(in srgb, var(--ao-warn) 8%, transparent);
 }
 
 /* First-load failure: no last-known board to keep, so the whole board area
@@ -525,9 +898,9 @@
 .ao-setup-card {
   max-width: 560px;
   border: 1px solid var(--ao-border);
-  border-radius: 12px;
+  border-radius: var(--ao-r-md);
   padding: 24px 26px;
-  background: rgba(255, 255, 255, 0.02);
+  background: color-mix(in srgb, var(--ao-text) 3%, transparent);
 }
 
 .ao-setup-title {
@@ -542,7 +915,7 @@
   font-family: ui-monospace, monospace;
   font-size: 11.5px;
   color: var(--ao-text);
-  background: rgba(255, 255, 255, 0.05);
+  background: color-mix(in srgb, var(--ao-text) 6%, transparent);
   border-radius: 5px;
   padding: 1px 5px;
 }
@@ -572,8 +945,8 @@
 .ao-overlay {
   position: fixed;
   inset: 0;
-  background: rgba(4, 6, 14, 0.66);
-  backdrop-filter: blur(3px);
+  background: var(--ao-overlay-bg);
+  backdrop-filter: var(--ao-overlay-blur);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -584,17 +957,19 @@
 
 .ao-sheet {
   width: min(560px, calc(100vw - 40px));
-  background: linear-gradient(180deg, rgba(24, 28, 54, 0.97), rgba(14, 17, 34, 0.97));
+  background: var(--ao-bg-sheet);
   border: 1px solid var(--ao-border-bright);
-  border-radius: 16px;
+  border-radius: var(--ao-r-xl);
   padding: 18px;
   display: flex;
   flex-direction: column;
   gap: 12px;
-  box-shadow: 0 18px 60px rgba(0, 0, 0, 0.55);
+  box-shadow: var(--ao-sheet-shadow);
+  backdrop-filter: var(--ao-blur-sheet);
 }
 
 .ao-sheet-title {
+  font-family: var(--ao-font-display);
   font-size: 15px;
   font-weight: 700;
 }
@@ -615,9 +990,9 @@
 .ao-input {
   font-size: 13px;
   color: var(--ao-text);
-  background: rgba(9, 12, 26, 0.8);
+  background: var(--ao-bg-input);
   border: 1px solid var(--ao-border);
-  border-radius: 10px;
+  border-radius: var(--ao-r-sm);
   padding: 8px 10px;
   outline: none;
 }
@@ -652,16 +1027,16 @@
 
 .ao-header-live.is-live {
   color: var(--ao-good);
-  border-color: rgba(52, 211, 153, 0.45);
-  background: rgba(52, 211, 153, 0.08);
+  border-color: color-mix(in srgb, var(--ao-good) 45%, transparent);
+  background: color-mix(in srgb, var(--ao-good) 8%, transparent);
 }
 
 /* The daemon is down and we're holding the last-known board: degraded, not
    dead — retries are running. */
 .ao-header-live.is-degraded {
-  color: var(--ao-warn, #fbbf24);
-  border-color: rgba(251, 191, 36, 0.45);
-  background: rgba(251, 191, 36, 0.08);
+  color: var(--ao-warn);
+  border-color: color-mix(in srgb, var(--ao-warn) 45%, transparent);
+  background: color-mix(in srgb, var(--ao-warn) 8%, transparent);
 }
 
 .ao-search { width: 230px; }
@@ -672,10 +1047,44 @@
 
 .ao-btn-toggle.is-on {
   color: var(--ao-accent-2);
-  border-color: rgba(56, 189, 248, 0.45);
-  background: rgba(56, 189, 248, 0.10);
+  border-color: color-mix(in srgb, var(--ao-accent-2) 45%, transparent);
+  background: color-mix(in srgb, var(--ao-accent-2) 10%, transparent);
   font-weight: 600;
 }
+
+/* --- theme picker ---------------------------------------------------------- */
+/* Compact swatch dots in the header actions. The dot fills are literal
+   colors ON PURPOSE: a dot must show its theme's palette from inside any
+   other theme, and CSS variables cannot cross theme scopes. */
+
+.ao-theme-picker {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0 2px;
+}
+
+.ao-theme-dot {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  border: 1px solid var(--ao-border);
+  padding: 0;
+  cursor: pointer;
+  transition: transform 120ms ease;
+}
+.ao-theme-dot:hover { transform: scale(1.15); }
+.ao-theme-dot.is-on {
+  outline: 2px solid var(--ao-accent-2);
+  outline-offset: 1px;
+}
+
+.ao-theme-dot-nebula { background: linear-gradient(135deg, #7c6cff, #38bdf8); }
+.ao-theme-dot-waves { background: oklch(0.7 0.21 10); }
+.ao-theme-dot-editorial { background: #faf8f3; border-color: #cfc8b6; }
+.ao-theme-dot-aurora { background: linear-gradient(120deg, #2dd4bf, #818cf8 52%, #e879f9); }
+.ao-theme-dot-glass { background: linear-gradient(145deg, #7cc4ff, #8b5cf6); }
+.ao-theme-dot-air { background: linear-gradient(135deg, #8ecdfa 35%, #a3e635); }
 
 /* --- detail sheet --------------------------------------------------------- */
 
@@ -742,10 +1151,13 @@
   border-top: 1px solid var(--ao-border);
   padding-top: 8px;
   /* The transcript container scrolls (420px cap); the composer sticks to its
-     visible bottom so the message box never scrolls out of reach. */
+     visible bottom so the message box never scrolls out of reach. On blurred
+     translucent themes the composer needs its own frost or the chat bleeds
+     through beneath the sticky band. */
   position: sticky;
   bottom: 0;
-  background: linear-gradient(180deg, rgba(24, 28, 54, 0.97), rgba(14, 17, 34, 0.97));
+  background: var(--ao-bg-sheet);
+  backdrop-filter: var(--ao-blur-sheet);
   padding-bottom: 2px;
 }
 
@@ -809,7 +1221,7 @@
   font-size: 11px;
   border-radius: 50%;
   border: 1px solid var(--ao-border);
-  background: rgba(7, 9, 18, 0.85);
+  background: var(--ao-overlay-bg);
   color: var(--ao-text);
   cursor: pointer;
 }
@@ -825,8 +1237,8 @@
   padding: 6px 14px;
   font-size: 12px;
   font-weight: 600;
-  color: var(--ao-text);
-  background: linear-gradient(180deg, rgba(124, 108, 255, 0.85), rgba(56, 189, 248, 0.75));
+  color: var(--ao-accent-contrast);
+  background: var(--ao-primary-fill);
   border: 1px solid var(--ao-border-bright);
   border-radius: 999px;
   cursor: pointer;
@@ -871,16 +1283,17 @@
 .ao-chat-user .ao-bubble {
   border-bottom-left-radius: 14px;
   border-bottom-right-radius: 4px;
-  background: linear-gradient(135deg, rgba(124, 108, 255, 0.35), rgba(56, 189, 248, 0.26));
-  border: 1px solid rgba(124, 108, 255, 0.5);
+  background: var(--ao-bubble-user-bg);
+  border: 1px solid var(--ao-bubble-user-border);
+  color: var(--ao-bubble-user-fg);
 }
 .ao-chat-worker .ao-bubble {
-  background: rgba(52, 211, 153, 0.09);
-  border: 1px solid rgba(52, 211, 153, 0.3);
+  background: var(--ao-bubble-worker-bg);
+  border: 1px solid var(--ao-bubble-worker-border);
 }
 .ao-chat-orchestrator .ao-bubble {
-  background: rgba(251, 191, 36, 0.06);
-  border: 1px dashed rgba(251, 191, 36, 0.45);
+  background: var(--ao-bubble-orch-bg);
+  border: 1px dashed var(--ao-bubble-orch-border);
 }
 
 /* per-class filter chips over the chat */
@@ -896,9 +1309,9 @@
   text-transform: none;
 }
 .ao-class-chip.is-off { opacity: 0.45; }
-.ao-class-worker { color: var(--ao-good); border-color: rgba(52, 211, 153, 0.4); }
-.ao-class-user { color: var(--ao-accent-2); border-color: rgba(56, 189, 248, 0.4); }
-.ao-class-orchestrator { color: var(--ao-warn); border-color: rgba(251, 191, 36, 0.4); }
+.ao-class-worker { color: var(--ao-good); border-color: color-mix(in srgb, var(--ao-good) 40%, transparent); }
+.ao-class-user { color: var(--ao-accent-2); border-color: color-mix(in srgb, var(--ao-accent-2) 40%, transparent); }
+.ao-class-orchestrator { color: var(--ao-warn); border-color: color-mix(in srgb, var(--ao-warn) 40%, transparent); }
 
 /* per-harness icons (cards + spawn form) */
 .ao-chip-harness {
@@ -978,7 +1391,7 @@
 }
 .ao-plan-in-progress .ao-plan-glyph {
   background: var(--ao-accent-2);
-  box-shadow: 0 0 8px rgba(56, 189, 248, 0.8);
+  box-shadow: 0 0 8px color-mix(in srgb, var(--ao-accent-2) 80%, transparent);
   animation: ao-plan-pulse 1.6s ease-in-out infinite;
 }
 .ao-plan-in-progress .ao-plan-text { color: var(--ao-text); }
@@ -988,7 +1401,7 @@
 }
 .ao-plan-completed .ao-plan-glyph {
   background: var(--ao-good);
-  color: #06281d;
+  color: var(--ao-accent-contrast);
 }
 .ao-plan-completed .ao-plan-text { color: var(--ao-good); }
 .ao-plan-cancelled .ao-plan-glyph {
@@ -1028,7 +1441,7 @@ a.ao-btn.ao-open-ao {
   align-items: center;
   text-decoration: none;
   color: var(--ao-accent-2);
-  border-color: rgba(56, 189, 248, 0.35);
+  border-color: color-mix(in srgb, var(--ao-accent-2) 35%, transparent);
   font-size: 11.5px;
   padding: 4px 10px;
   /* Narrow cards: three actions don't fit one row — keep the label on one
@@ -1038,7 +1451,7 @@ a.ao-btn.ao-open-ao {
   white-space: nowrap;
 }
 a.ao-btn.ao-card-open:hover,
-a.ao-btn.ao-open-ao:hover { background: rgba(56, 189, 248, 0.10); }
+a.ao-btn.ao-open-ao:hover { background: color-mix(in srgb, var(--ao-accent-2) 10%, transparent); }
 a.ao-btn.ao-open-ao { font-size: 12px; }
 
 /* --- tool executions in the transcript ------------------------------------ */
@@ -1061,7 +1474,7 @@ a.ao-btn.ao-open-ao { font-size: 12px; }
   cursor: pointer;
   min-width: 0;
 }
-.ao-tool-head:hover { background: rgba(124, 108, 255, 0.08); }
+.ao-tool-head:hover { background: var(--ao-hover); }
 
 .ao-tool-glyph {
   flex: none;
@@ -1094,7 +1507,7 @@ a.ao-btn.ao-open-ao { font-size: 12px; }
   width: 9px;
   height: 9px;
   border-radius: 50%;
-  border: 1.5px solid rgba(110, 231, 249, 0.35);
+  border: 1.5px solid color-mix(in srgb, var(--ao-accent-2) 35%, transparent);
   border-top-color: var(--ao-accent-2);
   animation: ao-spin 0.9s linear infinite;
 }
@@ -1105,7 +1518,7 @@ a.ao-btn.ao-open-ao { font-size: 12px; }
 .ao-tool-body {
   margin: 3px 0 4px 25px;
   padding: 7px 9px;
-  background: rgba(9, 12, 26, 0.65);
+  background: var(--ao-bg-inset);
   border: 1px solid var(--ao-border);
   border-radius: 8px;
   max-height: 240px;
@@ -1151,7 +1564,7 @@ a.ao-btn.ao-open-ao { font-size: 12px; }
   cursor: pointer;
   min-width: 0;
 }
-.ao-thinking-head:hover { background: rgba(124, 108, 255, 0.08); }
+.ao-thinking-head:hover { background: var(--ao-hover); }
 
 .ao-thinking-glyph {
   flex: none;
@@ -1191,7 +1604,7 @@ a.ao-btn.ao-open-ao { font-size: 12px; }
 .ao-thinking-body {
   margin: 3px 0 4px 25px;
   padding: 7px 9px;
-  background: rgba(9, 12, 26, 0.65);
+  background: var(--ao-bg-inset);
   border: 1px solid var(--ao-border);
   border-radius: 8px;
   max-height: 240px;
@@ -1238,8 +1651,8 @@ a.ao-btn.ao-open-ao { font-size: 12px; }
 .ao-chip-usage,
 .ao-chip-resource {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  color: var(--ao-text-dim, #8b96a5);
-  border-color: rgba(139, 150, 165, 0.3);
+  color: var(--ao-text-dim);
+  border-color: var(--ao-border);
 }
 
 .ao-card-pin {
@@ -1259,10 +1672,10 @@ a.ao-btn.ao-open-ao { font-size: 12px; }
 
 .ao-pr-comments { margin-left: 3px; font-size: 10px; }
 
-.ao-chip-pr.is-open { color: #4ade80; border-color: rgba(74, 222, 128, 0.35); }
-.ao-chip-pr.is-draft { color: #8b96a5; }
-.ao-chip-pr.is-merged { color: #c4b5fd; border-color: rgba(196, 181, 253, 0.35); }
-.ao-chip-pr.is-closed { color: #f87171; border-color: rgba(248, 113, 113, 0.35); }
+.ao-chip-pr.is-open { color: var(--ao-good); border-color: color-mix(in srgb, var(--ao-good) 35%, transparent); }
+.ao-chip-pr.is-draft { color: var(--ao-text-dim); }
+.ao-chip-pr.is-merged { color: var(--ao-accent-3); border-color: color-mix(in srgb, var(--ao-accent-3) 35%, transparent); }
+.ao-chip-pr.is-closed { color: var(--ao-bad); border-color: color-mix(in srgb, var(--ao-bad) 35%, transparent); }
 
 /* --- Spawn form option grid ------------------------------------------------- */
 
@@ -1287,5 +1700,5 @@ a.ao-btn.ao-open-ao { font-size: 12px; }
 
 .ao-detail-pr-facts {
   font-size: 11px;
-  color: var(--ao-text-dim, #8b96a5);
+  color: var(--ao-text-dim);
 }

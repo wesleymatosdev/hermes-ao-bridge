@@ -225,6 +225,29 @@ outages get the retry banner instead of regressing to setup.
 **Per-harness icons.** Cards and the spawn form show the same icon per harness
 that the AO desktop app shows (38 harnesses mapped, with a fallback icon).
 
+**Themes.** Swatch dots in the board header switch between six themes with no
+reload; the choice persists in the browser (`ao-bridge.theme` in localStorage,
+per browser like the other board settings). Everything renders from CSS custom
+properties declared on the board root, so a theme is one token block in
+`dashboard/dist/style.css` plus an entry in `THEMES` (`dashboard/dist/index.js`):
+
+| Theme | Feel |
+|---|---|
+| **Nebula Classic** *(default)* | The original galaxy-dark board — violet/cyan on deep space. |
+| **Waves Discovery** | Dark neutral OKLCH, one rose accent, teal for anything live. Dense and flat. |
+| **Light Editorial** | Paper surfaces, ink text, hairline rules, radius 0, one vermilion accent, serif display voice. |
+| **Dark Aurora** | Near-black glass panels behind a teal→indigo→magenta aurora wash. |
+| **Liquid Glass** | Frosted translucent panels over a colorful ambient backdrop, specular edges. Blur lives on the big surfaces only — cards skip per-card `backdrop-filter` so 300+ cards still scroll cleanly. |
+| **Air** | The light counterpart of Liquid Glass, from the atmosphere of air.inc: bright sky gradient with soft clouds, translucent white-glass panels, dark ink text, and one vivid lime accent marking whatever is alive (working cards, running dots, plan pulse). Static gradients only — same perf stance as Liquid Glass. |
+
+> **Roadmap — light/dark variants per theme (known next step, deferred):**
+> each theme should eventually offer light and dark variations. The token
+> layer is already shaped for it — every component reads only surface/text/
+> accent custom properties from the theme block, so a variant is a modifier
+> class (e.g. `.ao-theme-editorial-light`) that re-points that theme's tokens,
+> with the theme record gaining a `variants` list the picker renders as a
+> secondary toggle. No component refactor expected.
+
 ## Configuration
 
 Settings live at `plugins.entries.ao-bridge.settings.*` in `~/.hermes/config.yaml`:

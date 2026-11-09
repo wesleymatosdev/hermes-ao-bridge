@@ -41,6 +41,32 @@
   // so the fixed plugin id doubles as the URL base.
   const ASSET_BASE = "/dashboard-plugins/ao-bridge";
 
+  // === theme layer: begin (pure on purpose — tests/test_themes.py runs this
+  // === exact block under node with a stubbed localStorage) ===
+  const THEME_STORAGE_KEY = "ao-bridge.theme";
+  const DEFAULT_THEME = "nebula";
+  const THEMES = [
+    { id: "nebula", label: "Nebula Classic" },
+    { id: "waves", label: "Waves Discovery" },
+    { id: "editorial", label: "Light Editorial" },
+    { id: "aurora", label: "Dark Aurora" },
+    { id: "glass", label: "Liquid Glass" },
+    { id: "air", label: "Air" },
+  ];
+  // Anything unknown in storage (first run, a renamed id, hand-edited
+  // localStorage) falls back to the default instead of breaking the board.
+  function normalizeTheme(id) {
+    return THEMES.some(function (t) { return t.id === id; }) ? id : DEFAULT_THEME;
+  }
+  function readStoredTheme() {
+    try { return normalizeTheme(window.localStorage.getItem(THEME_STORAGE_KEY)); }
+    catch (_e) { return DEFAULT_THEME; }
+  }
+  function writeStoredTheme(id) {
+    try { window.localStorage.setItem(THEME_STORAGE_KEY, normalizeTheme(id)); } catch (_e) {}
+  }
+  // === theme layer: end ===
+
   // Per-harness icon map (assets/harness-icons.json, copied from the AO
   // desktop app). Fetched once, cached at module scope.
   let iconMapPromise = null;
@@ -1500,6 +1526,14 @@
       try { return window.localStorage.getItem("ao-bridge.activeOnly") !== "0"; }
       catch (_e) { return true; }
     });
+    // Board theme: read once, switch live (the class on the root div re-points
+    // the CSS custom properties — no reload), persisted like the filters.
+    const [theme, setTheme] = useState(readStoredTheme);
+    function setThemePersisted(id) {
+      const next = normalizeTheme(id);
+      setTheme(next);
+      writeStoredTheme(next);
+    }
     const timerRef = useRef(null);
     const wsRef = useRef(null);
     const iconMap = useHarnessIcons();
@@ -1741,7 +1775,7 @@
       return list;
     }, [data, matchesArchiveFilters]);
 
-    return h("div", { className: "ao-bridge" },
+    return h("div", { className: "ao-bridge ao-theme-" + normalizeTheme(theme) },
       h("div", { className: "ao-header" },
         h("div", { className: "ao-header-title" },
           h("span", { className: "ao-header-name" }, "AO Bridge"),
@@ -1801,6 +1835,17 @@
             })
           ),
           error && !firstRunSetup ? h("span", { className: "ao-banner ao-banner-error" }, error) : null,
+          h("div", { className: "ao-theme-picker", role: "group", "aria-label": "Board theme" },
+            THEMES.map(function (t) {
+              return h("button", {
+                key: t.id,
+                className: "ao-theme-dot ao-theme-dot-" + t.id + (theme === t.id ? " is-on" : ""),
+                title: "Theme: " + t.label,
+                "aria-label": "Theme: " + t.label,
+                "aria-pressed": theme === t.id,
+                onClick: function () { setThemePersisted(t.id); },
+              });
+            })),
           h("button", { className: "ao-btn ao-btn-ghost", onClick: function () { refresh(); } }, "Refresh"),
           h("button", { className: "ao-btn ao-btn-primary", onClick: function () { setSpawnOpen(true); } }, "+ Spawn worker")
         )
