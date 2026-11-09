@@ -1099,3 +1099,18 @@ a.ao-btn.ao-open-ao { font-size: 12px; }
   white-space: pre-wrap;
   word-break: break-word;
 }
+
+/* --- Hermes session-store enrichment section ------------------------------- */
+/* Sits under the AO transcript with a left accent tint marking provenance:
+   these rows come from the local Hermes store, not the ACP view. */
+
+.ao-enriched {
+  border-left: 2px solid var(--ao-accent-2);
+  padding-left: 10px;
+}
+
+.ao-enriched-stats {
+  font-size: 11px;
+  color: var(--ao-text-dim);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}

@@ -108,6 +108,30 @@ queued"* — and daemon refusals (empty text, a harness that can't take
 mid-turn guidance, uncertain delivery) surface inline with the daemon's error
 code. The legacy queue-only `/send` route stays on the backend for
 compatibility.
+**Hermes session-store enrichment (hermes workers).** ACP — the protocol AO
+uses to watch harnesses — delivers a lossy view of a `hermes` worker: command
+outputs arrive truncated and oversized tool results degrade to a
+"persisted-output" notice (parity audit below: 116k vs 442k characters of
+tool I/O on one real session). Because this plugin's backend runs on the same
+machine as the Hermes gateway, for `hermes`-harness sessions whose Hermes
+session row it can identify, the detail sheet gains a second section —
+**Hermes session store — full tool I/O** — with the session's real stats
+(model, input/output/reasoning tokens, duration, cost) and the full-fidelity
+tool calls (exact tool name, arguments, full output) and reasoning exactly as
+Hermes stored them. Enriched rows are visually tinted and read straight from
+`state.db` over a read-only sqlite connection — the plugin never writes to it
+and never imports Hermes internals. Sessions with no identifiable Hermes row
+(a non-`hermes` harness, or a worker that never produced a session row) show
+no enrichment section at all; a missing store changes nothing. The join is
+not a guess: AO launches `hermes acp` with its cwd set to the session's
+worktree (`…/worktrees/<projectId>/<sessionId>`; standalone:
+`…/worktrees/standalone/sessions/<sessionId>`), and that cwd is stored on the
+Hermes session row — an exact suffix match narrowed to rows started at/after
+the AO session's creation, most recent wins (resumes mint a fresh row). On a
+measured 60 recent sessions this joined 52; the 8 misses were sessions with
+no Hermes row at all, not wrong joins. Assumes plugin and gateway share the
+machine (the normal install). Non-standard installs can point the reader
+explicitly with the `AO_BRIDGE_STATE_DB` environment variable.
 
 **Orchestrators.** AO orchestrator sessions (they coordinate workers; they
 don't carry worker state) never enter the Kanban columns or their counters.
@@ -306,6 +330,11 @@ directly instead.
   and the plugin doesn't fight the daemon's lifecycle model.
 - **Spawn requires a healthy workspace registration** — AO itself rejects
   spawns for projects whose directories are missing.
+- **Enrichment can't recover outputs Hermes spilled to disk.** When a tool
+  result exceeded Hermes's inline limit, Hermes itself stored only the
+  "persisted-output" notice (the full text lives in a spillover cache file);
+  the enriched section then shows the same notice AO saw — that is everything
+  the store holds.
 
 ## Development
 
@@ -327,7 +356,7 @@ the AO daemon with `urllib`:
 | Plugin route (`/api/plugins/ao-bridge/`) | AO daemon call |
 |---|---|
 | `GET /health`, `GET /board` | `GET /healthz`; `GET /api/v1/projects` + `GET /api/v1/sessions` (+ `GET /api/v1/sessions/{id}/conversation` for plan steps) |
-| `GET /sessions/{id}/detail` | `GET /api/v1/sessions/{id}` + `…/conversation` |
+| `GET /sessions/{id}/detail` | `GET /api/v1/sessions/{id}` + `…/conversation`; for `hermes` sessions plus a read-only sqlite read of the local Hermes `state.db` (enrichment) |
 | `POST /spawn` | `POST /api/v1/sessions` (kind `worker`) |
 | `POST /sessions/{id}/steer` | `POST /api/v1/sessions/{id}/conversation/steer-or-send` (steer-or-send; mints the required `clientMessageId`) |
 | `POST /sessions/{id}/send` | `POST /api/v1/sessions/{id}/send` (legacy queue-only, kept for compatibility) |
@@ -347,7 +376,24 @@ throwaway directory.) Coverage: the AO client, column mapping, the FastAPI
 router (board assembly, spawn/send/steer/kill, steer error-shape mapping,
 detail shape and
 bounding, WebSocket stream, outage recovery, version-skew binding), plan
-parsing, and the relay (event extraction, batching, dedup, delivery).
+parsing, the relay (event extraction, batching, dedup, delivery), and the
+Hermes enrichment (join resolution against a fixture `state.db`, merge +
+bounding contracts, degradation without a store).
+
+#### Parity audit — AO's ACP view vs the Hermes store (2026-11-09)
+
+What AO captured vs what Hermes stored for the same worker session, measured
+live (enrichment exists to close the tool-I/O half of this gap):
+
+| Signal | AO (ACP conversation) | Hermes `state.db` |
+|---|---|---|
+| Tool I/O, hermes-agent-31 | 116,336 chars | 442,119 chars |
+| Tool I/O, agent-orchestrator-172 | 36k (command) + persisted-output notices | 400,477 chars |
+| Command output cap | ~630 chars max observed | full |
+| Exact tool names | provider-facing summaries | `terminal`, `read_file`, `patch`, … |
+| Reasoning | 162,649 chars | 163,914 chars (at parity — no enrichment needed) |
+| Session stats (model, tokens, cost, duration) | absent | sessions row |
+| Sessions with a Hermes row | 52 of 60 recent | the 8 misses never produced one |
 
 **Serving locally:** point a throwaway Hermes home at this checkout to verify
 frontend/backend changes against a live daemon — assets are served per-request

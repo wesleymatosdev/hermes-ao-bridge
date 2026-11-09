@@ -726,6 +726,56 @@
     });
   }
 
+  // --- Hermes session-store enrichment --------------------------------------
+  // For hermes-harness sessions whose Hermes session row is found on this
+  // machine (worktree-cwd join), the detail payload carries "hermesEnriched":
+  // the session's stats plus full-fidelity tool calls (name + args + output)
+  // and reasoning that ACP truncates (parity audit, 2026-11-09: 116k vs 442k
+  // chars of tool I/O on one session). Rendered as its own section UNDER the
+  // AO transcript — the AO view stays the protagonist; enriched rows reuse
+  // the same tool-run/thinking components, tinted to mark the provenance.
+  function enrichedStatsLine(st) {
+    const parts = [];
+    if (st.model) parts.push(st.model);
+    const toks = [];
+    if (st.inputTokens != null) toks.push("in " + Number(st.inputTokens).toLocaleString());
+    if (st.outputTokens != null) toks.push("out " + Number(st.outputTokens).toLocaleString());
+    if (st.reasoningTokens) toks.push("think " + Number(st.reasoningTokens).toLocaleString());
+    if (toks.length) parts.push(toks.join(" / ") + " tok");
+    if (st.durationSeconds != null) parts.push(Math.max(1, Math.round(st.durationSeconds / 60)) + " min");
+    if (st.estimatedCostUsd != null && st.estimatedCostUsd > 0) parts.push("$" + st.estimatedCostUsd.toFixed(4));
+    return parts.join(" · ");
+  }
+
+  function EnrichedSection(props) {
+    const enr = props.enriched;
+    if (!enr || !enr.found) return null;
+    const acts = enr.activities || [];
+    return h("div", { className: "ao-detail-transcript ao-enriched" },
+      h("div", { className: "ao-detail-key" },
+        "Hermes session store — full tool I/O" +
+        (enr.activitiesTruncated
+          ? " (last " + acts.length + " of " + enr.activitiesTotal + ")"
+          : "")),
+      h("div", { className: "ao-enriched-stats" }, enrichedStatsLine(enr.session || {})),
+      acts.length === 0
+        ? h("div", { className: "ao-column-empty" }, "No tool activity recorded")
+        : acts.map(function (a, i) {
+            // Same row components as the AO transcript: reasoning renders as a
+            // ThinkingRow (never live — enrichment is recorded history), tool
+            // calls as quiet mcp_tool rows with the full stored I/O.
+            if (a.kind === "reasoning")
+              return h(ThinkingRow, { key: "e" + i, activity: {
+                activityKind: "reasoning", status: "completed",
+                text: a.text, preview: a.preview,
+                textTruncated: a.textTruncated } });
+            return h(ToolRow, { key: "e" + i, activity: {
+              activityKind: "mcp_tool", status: "completed",
+              toolName: a.toolName, input: a.input, output: a.output,
+              outputTruncated: a.outputTruncated } });
+          }));
+  }
+
   // --- Detail sheet (card click; read-only) --------------------------------
   // Opens at the LATEST message and follows new ones while open: the sheet
   // watches the session over the plugin's /events WS ("watch" -> "detail"
@@ -923,6 +973,7 @@
                             working: ((detail && detail.session.status) || session.status || "") === "working" })
             : null
         ) : null,
+        detail ? h(EnrichedSection, { enriched: detail.hermesEnriched }) : null,
         h("div", { className: "ao-sheet-actions" },
           h("button", { type: "button", className: "ao-btn ao-btn-ghost", onClick: props.onClose }, "Close")
         )
