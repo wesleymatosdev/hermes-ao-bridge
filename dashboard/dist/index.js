@@ -190,12 +190,17 @@
   // backend — plugin_api.py imports once at server startup while this file is
   // served fresh from disk, so the pair can skew across a plugin update.
   const STATE_LABELS = {
-    working: "Working", idle: "Idle", awaiting_pr: "Awaiting PR", archived: "Archived",
+    working: "Working", idle: "Idle", awaiting_pr: "Awaiting PR",
+    exited: "Exited", archived: "Archived",
   };
 
   function deriveState(card) {
+    // Mirrors backend state_for: "exited" is its own honest state — an
+    // exited session is resumable, not archived (v0.8.2; "Archived" here
+    // made live workers read as dead).
     const st = (card.status || "").toLowerCase();
-    if (st === "terminated" || st === "exited") return "archived";
+    if (st === "terminated") return "archived";
+    if (st === "exited") return "exited";
     if (st === "working") return "working";
     if ((card.displayStatus || "").toLowerCase().indexOf("awaiting pr") !== -1) return "awaiting_pr";
     return "idle";
@@ -216,7 +221,7 @@
     });
     const distinct = Object.keys(counts);
     if (distinct.length === 1 && distinct[0] === "working") return "";
-    const order = ["working", "awaiting_pr", "idle", "archived"];
+    const order = ["working", "awaiting_pr", "idle", "exited", "archived"];
     return order
       .filter(function (s) { return counts[s]; })
       .map(function (s) { return counts[s] + " " + STATE_LABELS[s].toLowerCase(); })
@@ -2072,7 +2077,12 @@
       if (harnessFilter !== "all" && (c.harness || "").trim() !== harnessFilter) return false;
       // "Active only" means a LIVE TURN (v0.5.1 semantics) — idle sessions
       // hide with it; the archive strip opts out via applyActiveOnly=false.
-      if (applyActiveOnly && stateOf(c) !== "working") return false;
+      // v0.8.2: actually consult the TOGGLE. The v0.5.1 rewrite dropped the
+      // read (applyActiveOnly derived from opts alone, and matchesFilters
+      // passes no opts), so "Show all" was a no-op and every non-working
+      // card was permanently hidden — the live board read as "everything is
+      // archived" while only the strip and live turns rendered.
+      if (activeOnly && applyActiveOnly && stateOf(c) !== "working") return false;
       if (applyRecency) {
         const bucket = RECENCY_OPTIONS.find(function (r) { return r.id === recency; });
         const cutoffMs = bucket && bucket.ms ? Date.now() - bucket.ms : 0;
@@ -2117,7 +2127,7 @@
       list.sort(function (a, b) {
         const la = stateOf(a), lb = stateOf(b);
         if (la !== lb) {
-          const order = { working: 0, awaiting_pr: 1, idle: 2, archived: 3 };
+          const order = { working: 0, awaiting_pr: 1, idle: 2, exited: 3, archived: 4 };
           return order[la] - order[lb];
         }
         return (b.updatedAt || "").localeCompare(a.updatedAt || "");

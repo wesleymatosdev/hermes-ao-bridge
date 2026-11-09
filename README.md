@@ -73,11 +73,14 @@ is AO's own model (a finished-but-unarchived worker keeps occupying its
 column), and the bridge deliberately mirrors it: `column_for` decides only
 WHERE a session sits, never whether it is busy. On top of that placement the
 bridge renders an honest activity state per session: **Working** (live turn),
-**Idle** (alive, no turn), **Awaiting PR** (AO's displayStatus), or
-**Archived** (terminated / exited). The card chips, the orchestrator strip's
-dots, and the column-header counters (e.g. "3 working · 2 idle") all speak
-this enum, and the **Active only** toggle keeps only sessions with a live
-turn — an idle "Awaiting PR" card in Done never counts as active.
+**Idle** (alive, no turn), **Awaiting PR** (AO's displayStatus), **Exited**
+(agent process gone, session resumable — v0.8.2 gave this its own state; it
+was previously mislabeled "Archived", which made live workers read as dead),
+or **Archived** (terminated — the archive strip's population). The card
+chips, the orchestrator strip's dots, and the column-header counters (e.g.
+"3 working · 2 idle") all speak this enum, and the **Active only** toggle
+keeps only sessions with a live turn — an idle "Awaiting PR" card in Done
+never counts as active.
 
 **Filters.** Text search over project, session name and harness; dropdown
 filters for status, project and harness; a recency selector (last hour / 24h /

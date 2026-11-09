@@ -632,6 +632,11 @@
   border-color: color-mix(in srgb, var(--ao-warn) 35%, transparent);
   background: color-mix(in srgb, var(--ao-warn) 8%, transparent);
 }
+.ao-chip-state-exited {
+  color: var(--ao-text-dim);
+  border-color: var(--ao-border);
+  background: var(--ao-bg-chip);
+}
 .ao-chip-state-archived {
   color: color-mix(in srgb, var(--ao-c-archived) 80%, transparent);
   border-color: color-mix(in srgb, var(--ao-c-archived) 30%, transparent);
@@ -753,6 +758,9 @@
 .ao-orch-dot-awaiting_pr {
   background: var(--ao-warn);
   box-shadow: 0 0 6px color-mix(in srgb, var(--ao-warn) 45%, transparent);
+}
+.ao-orch-dot-exited {
+  background: color-mix(in srgb, var(--ao-c-archived) 55%, transparent);
 }
 .ao-orch-dot-archived {
   background: color-mix(in srgb, var(--ao-c-archived) 30%, transparent);

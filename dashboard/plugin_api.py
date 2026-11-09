@@ -553,8 +553,9 @@ def column_for(session: dict) -> str:
 #   working      live turn running
 #   idle         alive, no turn
 #   awaiting_pr  work finished, PR not opened yet (AO's displayStatus)
-#   archived     not alive (terminated, or agent process exited)
-SESSION_STATES = ("working", "idle", "awaiting_pr", "archived")
+#   exited       agent process gone, session resumable on AO's board
+#   archived     not alive (terminated — the archive strip's population)
+SESSION_STATES = ("working", "idle", "awaiting_pr", "exited", "archived")
 
 # Field choice verified against the live daemon at 1s resolution (2026-11-09):
 # on both a turn start and a turn end, ``status`` and ``activity.state`` flip
@@ -568,15 +569,18 @@ def state_for(session: dict) -> str:
     Order matters: termination is definitive even when displayStatus lags
     (a killed "Awaiting PR" session is archived, not awaiting); a live turn
     outranks every display nuance.
+
+    ``exited`` is its own state, NOT "archived" (v0.8.2): an exited session
+    keeps its AO board column and is resumable — labeling it "Archived" made
+    live workers read as dead (the v0.8.1 board bug). "Archived" is reserved
+    for termination, which is what the archive strip + Restore are for.
     """
     if session.get("isTerminated") or session.get("status") == "terminated":
         return "archived"
     if session.get("status") == "working":
         return "working"
     if session.get("status") == "exited":
-        # Agent process gone — not alive, so never active even though the
-        # session stays resumable on AO's board.
-        return "archived"
+        return "exited"
     if "awaiting pr" in (session.get("displayStatus") or "").lower():
         return "awaiting_pr"
     return "idle"
