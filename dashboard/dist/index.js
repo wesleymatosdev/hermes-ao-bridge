@@ -20,6 +20,10 @@
 
   const API = "/api/plugins/ao-bridge";
   const POLL_MS = 5000;
+  const DEFAULT_BASE_URL = "http://127.0.0.1:3001";
+  // Verified from the installed AO desktop app's own update feed
+  // (OrchestratorInc/agent-orchestrator) — not a guessed link.
+  const AO_APP_RELEASES_URL = "https://github.com/OrchestratorInc/agent-orchestrator/releases";
   // One message for every "daemon is down, holding the last-known board"
   // surface: header banner, WS daemon_error frames, the first-load error state.
   const DAEMON_DOWN_MSG = "AO daemon unreachable — retrying…";
@@ -107,23 +111,33 @@
     return Math.floor(secs / 86400) + "d ago";
   }
 
-  function parseApiErrorMessage(err) {
+  // Parse a plugin-API failure into { kind, message, baseUrl } — typed
+  // payloads ({ kind, retryable, message, baseUrl }) from the v0.2.8+ backend,
+  // degraded to the raw text for older backends.
+  function parseApiError(err) {
     const raw = (err && err.message) ? String(err.message) : String(err || "");
     const m = raw.match(/^(\d{3}):\s*(.*)$/s);
     const body = m ? m[2] : raw;
     try {
       const parsed = JSON.parse(body);
       if (parsed && parsed.detail) {
-        // Typed payloads ({ kind, retryable, message }) from the v0.2.8+
-        // backend; the friendly daemon message replaces the errno prose.
         if (typeof parsed.detail === "object") {
-          if (parsed.detail.kind === "daemon_unreachable") return "AO daemon unreachable — retrying…";
-          if (parsed.detail.message) return String(parsed.detail.message);
+          return {
+            kind: parsed.detail.kind || "error",
+            message: parsed.detail.kind === "daemon_unreachable"
+              ? DAEMON_DOWN_MSG
+              : String(parsed.detail.message || parsed.detail.kind || "AO daemon error"),
+            baseUrl: parsed.detail.baseUrl || "",
+          };
         }
-        return String(parsed.detail);
+        return { kind: "error", message: String(parsed.detail) };
       }
     } catch (_e) { /* not JSON */ }
-    return body || raw;
+    return { kind: "error", message: body || raw };
+  }
+
+  function parseApiErrorMessage(err) {
+    return parseApiError(err).message;
   }
 
   function authedFetchJson(url, options) {
@@ -509,10 +523,52 @@
 
   // --- Board page ----------------------------------------------------------
 
+  // First-run state: the daemon has NEVER answered (no cached board state at
+  // all). A retry banner would be dishonest here — the user has nothing to
+  // lose; they need setup guidance instead. "Was connected, now down" keeps
+  // the retry banner over the last-known board.
+  function SetupState(props) {
+    return h("div", { className: "ao-setup" },
+      h("div", { className: "ao-setup-card" },
+        h("div", { className: "ao-setup-title" }, "Agent Orchestrator not detected"),
+        h("p", { className: "ao-setup-text" },
+          "This board mirrors a local Agent Orchestrator (AO) daemon. Nothing answered at ",
+          h("code", { className: "ao-setup-url" }, props.baseUrl || DEFAULT_BASE_URL), " yet."),
+        h("ul", { className: "ao-setup-steps" },
+          h("li", null, "Install and open the ",
+            h("a", { className: "ao-chip-pr", href: AO_APP_RELEASES_URL,
+                     target: "_blank", rel: "noreferrer" }, "AO desktop app"),
+            " — it runs the daemon this plugin mirrors."),
+          h("li", null, "Already running the daemon elsewhere? Point the plugin at it: set ",
+            h("code", { className: "ao-setup-url" }, "plugins.entries.ao-bridge.settings.ao_base_url"),
+            " in your Hermes config.yaml (default " + DEFAULT_BASE_URL + ").")),
+        h("div", { className: "ao-setup-actions" },
+          h("button", { className: "ao-btn ao-btn-primary",
+                        onClick: props.onRetry }, "Retry now")),
+        h("div", { className: "ao-setup-hint" },
+          "Checks continue in the background — the board appears here on its own once a daemon answers.")
+      ));
+  }
+
   function AoBridgePage() {
     const [data, setData] = useState(null);
     const [error, setError] = useState(null);
+    const [errorKind, setErrorKind] = useState(null);
+    const [daemonUrl, setDaemonUrl] = useState(null);
     const [loaded, setLoaded] = useState(false);
+    // "Never connected" vs "was connected, now down": persisted, so a reload
+    // during an outage keeps the retry banner instead of regressing to setup.
+    const [everConnected, setEverConnected] = useState(function () {
+      try { return window.localStorage.getItem("ao-bridge.everConnected") === "1"; }
+      catch (_e) { return false; }
+    });
+    function markConnected() {
+      setEverConnected(function (prev) {
+        if (prev) return prev;
+        try { window.localStorage.setItem("ao-bridge.everConnected", "1"); } catch (_e) {}
+        return true;
+      });
+    }
     const [live, setLive] = useState(false);
     const [refreshedAt, setRefreshedAt] = useState(null);
     const [spawnOpen, setSpawnOpen] = useState(false);
@@ -549,14 +605,24 @@
     // version at all — also stale (pre-0.2.8 module behind this UI).
     const staleBackend = Boolean(manifestVersion && data
       && manifestVersion !== data.pluginVersion);
+    // First run: the daemon has never answered on this browser (no cached
+    // board state). Only a genuine "daemon unreachable" counts — any other
+    // failure keeps the ordinary error surface.
+    const firstRunSetup = Boolean(errorKind === "daemon_unreachable" && !everConnected && !data);
 
     const refresh = useCallback(function () {
       return authedFetchJson(API + "/board")
         .then(function (body) {
           setData(body); setError(null);
           setLoaded(true); setRefreshedAt(new Date());
+          markConnected();
         })
-        .catch(function (e) { setError(parseApiErrorMessage(e)); })
+        .catch(function (e) {
+          const parsed = parseApiError(e);
+          setError(parsed.kind === "daemon_unreachable" ? DAEMON_DOWN_MSG : parsed.message);
+          setErrorKind(parsed.kind);
+          setDaemonUrl(parsed.baseUrl || null);
+        })
         .finally(function () { setLoaded(true); });
     }, []);
 
@@ -584,14 +650,17 @@
 
       function onBoard(body) {
         if (closed) return;
-        setData(body); setError(null);
+        setData(body); setError(null); setErrorKind(null);
         setLoaded(true); setLive(true); setRefreshedAt(new Date());
+        markConnected();
         stopPoll(); // live again — the fallback poll did its job
       }
 
-      function onDaemonDown() {
+      function onDaemonDown(frame) {
         if (closed) return;
         setError(DAEMON_DOWN_MSG);
+        setErrorKind((frame && frame.error && frame.error.kind) || "daemon_unreachable");
+        setDaemonUrl((frame && frame.error && frame.error.baseUrl) || null);
         setLive(false);
         startPoll(); // keep retrying over HTTP while the WS is quiet
       }
@@ -608,7 +677,7 @@
             try {
               const msg = JSON.parse(ev.data);
               if (msg && msg.type === "board" && msg.board) onBoard(msg.board);
-              else if (msg && msg.type === "daemon_error") onDaemonDown();
+              else if (msg && msg.type === "daemon_error") onDaemonDown(msg);
             } catch (_e) { /* ignore */ }
           };
           ws.onclose = function (e) {
@@ -715,8 +784,8 @@
           data && data.baseUrl
             ? h("span", { className: "ao-header-daemon", title: data.baseUrl }, "daemon " + data.baseUrl.replace(/^https?:\/\//, ""))
             : null,
-          h("span", { className: "ao-header-live" + (live ? " is-live" : (error ? " is-degraded" : "")) },
-            live ? "live" : (error ? "degraded" : "polling")),
+          h("span", { className: "ao-header-live" + (live ? " is-live" : (error && everConnected ? " is-degraded" : "")) },
+            live ? "live" : (error && everConnected ? "degraded" : (firstRunSetup ? "setup" : "polling"))),
           refreshedAt ? h("span", { className: "ao-header-updated" }, "updated " + refreshedAt.toLocaleTimeString()) : null
         ),
         h("div", { className: "ao-header-actions" },
@@ -767,7 +836,7 @@
               return h("option", { key: s, value: s }, s);
             })
           ),
-          error ? h("span", { className: "ao-banner ao-banner-error" }, error) : null,
+          error && !firstRunSetup ? h("span", { className: "ao-banner ao-banner-error" }, error) : null,
           h("button", { className: "ao-btn ao-btn-ghost", onClick: function () { refresh(); } }, "Refresh"),
           h("button", { className: "ao-btn ao-btn-primary", onClick: function () { setSpawnOpen(true); } }, "+ Spawn worker")
         )
@@ -787,10 +856,12 @@
       !loaded
         ? h("div", { className: "ao-loading" }, "Loading AO board…")
         : !data
-          ? h("div", { className: "ao-board-error" },
-              h("div", { className: "ao-banner ao-banner-error" }, error || DAEMON_DOWN_MSG),
-              h("div", { className: "ao-board-error-hint" },
-                "The AO daemon has not answered yet. Retries continue automatically — the board appears here the moment the daemon does."))
+          ? firstRunSetup
+            ? h(SetupState, { baseUrl: daemonUrl, onRetry: function () { refresh(); } })
+            : h("div", { className: "ao-board-error" },
+                h("div", { className: "ao-banner ao-banner-error" }, error || DAEMON_DOWN_MSG),
+                h("div", { className: "ao-board-error-hint" },
+                  "The AO daemon has not answered yet. Retries continue automatically — the board appears here the moment the daemon does."))
           : h("div", { className: "ao-board" },
             columns.map(function (col) {
               return h(Column, {

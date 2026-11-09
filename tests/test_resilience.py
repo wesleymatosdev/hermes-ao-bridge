@@ -148,6 +148,9 @@ class UpstreamDownErrorShapeTest(SkewBase):
         self.assertTrue(detail["retryable"])
         self.assertTrue(str(detail["message"]).strip())
         self.assertTrue(str(detail.get("pluginVersion") or "").strip())
+        # The probed address, so a first-run UI can say WHAT it tried to reach
+        # (the daemon base URL is configurable via the ao_base_url setting).
+        self.assertEqual(detail.get("baseUrl"), "http://127.0.0.1:1")
 
     def test_health_typed_error_when_upstream_down(self):
         self._point_at_dead_upstream()
@@ -268,6 +271,7 @@ class EventsStreamOutageTest(SkewBase):
         self.assertEqual(err["type"], "daemon_error")
         self.assertEqual(err["error"]["kind"], "daemon_unreachable")
         self.assertTrue(err["error"]["retryable"])
+        self.assertTrue(str(err["error"].get("baseUrl") or "").strip())
 
         # Daemon comes back on a fresh server (the bouncer scenario), same
         # card set — the client must still hear a board frame so it can

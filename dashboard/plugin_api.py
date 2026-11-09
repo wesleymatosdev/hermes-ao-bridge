@@ -143,8 +143,9 @@ class AOApiError(Exception):
 class AOConnectionError(AOApiError):
     """The AO daemon is unreachable."""
 
-    def __init__(self, message: str = "AO daemon is unreachable"):
+    def __init__(self, message: str = "AO daemon is unreachable", base_url: str = ""):
         super().__init__(502, message)
+        self.base_url = base_url
 
 
 class AOClient:
@@ -176,7 +177,8 @@ class AOClient:
                 message = err.reason
             raise AOApiError(err.code, str(message)) from err
         except (urllib.error.URLError, OSError) as err:
-            raise AOConnectionError(f"AO daemon unreachable at {self.base_url}: {err}") from err
+            raise AOConnectionError(f"AO daemon unreachable at {self.base_url}: {err}",
+                                    base_url=self.base_url) from err
         if not body:
             return {}
         try:
@@ -433,7 +435,8 @@ class SendBody(BaseModel):
 # ---------------------------------------------------------------------------
 
 def _error_detail(kind: str, message: str, retryable: bool,
-                  upstream_status: Optional[int] = None) -> dict:
+                  upstream_status: Optional[int] = None,
+                  base_url: str = "") -> dict:
     """The typed error payload every failure path returns. ``pluginVersion``
     rides along so even an error response lets the frontend run the skew check
     (an erroring stale backend must still be identifiable)."""
@@ -441,6 +444,8 @@ def _error_detail(kind: str, message: str, retryable: bool,
                     "pluginVersion": PLUGIN_VERSION}
     if upstream_status is not None:
         detail["upstreamStatus"] = upstream_status
+    if base_url:
+        detail["baseUrl"] = base_url
     return detail
 
 
@@ -449,7 +454,8 @@ def _raise_mapped(err: AOApiError) -> None:
     JSON detail (not prose) so the UI can degrade in theme and retry."""
     if isinstance(err, AOConnectionError):
         raise HTTPException(status_code=502, detail=_error_detail(
-            "daemon_unreachable", str(err), retryable=True))
+            "daemon_unreachable", str(err), retryable=True,
+            base_url=getattr(err, "base_url", "")))
     if err.is_gone:
         raise HTTPException(status_code=404, detail=_error_detail(
             "gone", "Session not found (gone from the AO daemon)",
@@ -642,6 +648,7 @@ async def events(ws: WebSocket):
                             "kind": ("daemon_unreachable" if isinstance(err, AOConnectionError)
                                      else "upstream_error"),
                             "message": str(err), "retryable": True,
+                            "baseUrl": getattr(err, "base_url", ""),
                             "pluginVersion": PLUGIN_VERSION}})
                     except Exception:
                         pass  # client already gone; the outer handlers clean up

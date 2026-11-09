@@ -329,6 +329,55 @@
   text-align: center;
 }
 
+/* --- first-run setup (daemon never detected) ------------------------------ */
+
+.ao-setup {
+  display: flex;
+  justify-content: center;
+  padding: 56px 20px;
+}
+
+.ao-setup-card {
+  max-width: 560px;
+  border: 1px solid var(--ao-border);
+  border-radius: 12px;
+  padding: 24px 26px;
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.ao-setup-title {
+  font-size: 15px;
+  font-weight: 700;
+  margin-bottom: 10px;
+}
+
+.ao-setup-text { color: var(--ao-text-dim); font-size: 13px; line-height: 1.5; }
+
+.ao-setup-url {
+  font-family: ui-monospace, monospace;
+  font-size: 11.5px;
+  color: var(--ao-text);
+  background: rgba(255, 255, 255, 0.05);
+  border-radius: 5px;
+  padding: 1px 5px;
+}
+
+.ao-setup-steps {
+  margin: 12px 0 0;
+  padding-left: 18px;
+  color: var(--ao-text-dim);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.ao-setup-actions { margin-top: 16px; }
+
+.ao-setup-hint {
+  margin-top: 12px;
+  color: var(--ao-text-dim);
+  font-size: 11.5px;
+}
+
 .ao-loading {
   color: var(--ao-text-dim);
   padding: 40px 0;

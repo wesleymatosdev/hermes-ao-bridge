@@ -35,10 +35,27 @@ Message sheet — send a user-authored message to a running session:
 
 ![Message sheet](docs/screenshots/ao-bridge-message-sheet.png)
 
+## Prerequisites
+
+1. **Agent Orchestrator (AO) desktop app / daemon** — the plugin is a view over
+   the local AO daemon; it runs nothing itself. Install the [AO desktop app](https://github.com/OrchestratorInc/agent-orchestrator/releases)
+   and open it: launching the app starts the daemon on loopback.
+2. **Daemon base URL** — the plugin talks to `http://127.0.0.1:3001` by
+   default. If your daemon answers elsewhere, set `ao_base_url`:
+   `plugins.entries.ao-bridge.settings.ao_base_url` in `~/.hermes/config.yaml`
+   (or the `AO_BRIDGE_BASE_URL` env var for development). Loopback addresses
+   only; the plugin makes no external calls.
+3. **Plugin install** — from the Hermes CLI: `hermes plugins install
+   <source>` (or drop the repo into `~/.hermes/plugins/ao-bridge`), then
+   enable it in `plugins.enabled` and restart the dashboard so the backend
+   imports. Open the **AO Bridge** tab in the web dashboard.
+
+Until a daemon first answers, the board shows a setup panel instead of cards;
+once connected, a daemon going down degrades to the last-known board with a
+retry banner (see *Daemon-outage resilience* below).
+
 ## Requires
 
-- A running **Agent Orchestrator (AO) daemon** on the same machine (default
-  `http://127.0.0.1:3001`, configurable via the plugin's `ao_base_url` setting).
 - A Hermes version whose dashboard exposes `window.__HERMES_PLUGIN_SDK__`
   (current releases do).
 
