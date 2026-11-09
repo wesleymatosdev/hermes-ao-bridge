@@ -84,14 +84,14 @@ class DetailRouteTest(unittest.TestCase):
         s = body["session"]
         self.assertEqual(s["id"], "s1")
         self.assertEqual(s["projectId"], "hermes-agent")
-        self.assertEqual(s["aoLink"], "ao://sessions/hermes-agent/s1")
+        self.assertEqual(s["aoLink"], "ao-app://sessions/hermes-agent/s1")
         self.assertEqual([m["text"] for m in body["transcript"]], ["do the thing", "OK"])
         self.assertFalse(body["transcriptTruncated"])
 
     def test_detail_standalone_ao_link_has_no_project(self):
         self.ao.add_session(make_session("s2"))
         resp = self.http.get("/api/plugins/ao-bridge/sessions/s2/detail")
-        self.assertEqual(resp.json()["session"]["aoLink"], "ao://sessions/s2")
+        self.assertEqual(resp.json()["session"]["aoLink"], "ao-app://sessions/s2")
 
     def test_detail_truncates_transcript_to_tail(self):
         plugin_api.TRANSCRIPT_TAIL_LINES = 2

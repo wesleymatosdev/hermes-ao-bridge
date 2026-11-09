@@ -21,6 +21,12 @@
   const API = "/api/plugins/ao-bridge";
   const POLL_MS = 5000;
   const DEFAULT_BASE_URL = "http://127.0.0.1:3001";
+  // Deep-link scheme of the installed AO desktop app (Info.plist
+  // CFBundleURLTypes, 0.14.11-nightly): it registers ONLY "ao-app" — plain
+  // "ao://" never reaches the app. Kept as a single constant: if a future AO
+  // build registers another scheme, this is the one-line change (the backend
+  // has the same constant; the skew banner catches a mismatch).
+  const AO_DEEP_LINK_SCHEME = "ao-app";
   // Verified from the installed AO desktop app's own update feed
   // (OrchestratorInc/agent-orchestrator) — not a guessed link.
   const AO_APP_RELEASES_URL = "https://github.com/OrchestratorInc/agent-orchestrator/releases";
@@ -169,8 +175,42 @@
   function aoDeepLink(projectId, sessionId) {
     const sid = encodeURIComponent(sessionId || "");
     return projectId
-      ? "ao://sessions/" + encodeURIComponent(projectId) + "/" + sid
-      : "ao://sessions/" + sid;
+      ? AO_DEEP_LINK_SCHEME + "://sessions/" + encodeURIComponent(projectId) + "/" + sid
+      : AO_DEEP_LINK_SCHEME + "://sessions/" + sid;
+  }
+
+  // Interim open-in-AO flow (backend flag open_in_ao_links, default OFF):
+  // AO's open-url handler drops session deep links today — it only routes the
+  // orchestrator auth callback and billing hosts — so the link opens/focuses
+  // the app WITHOUT navigating to the session. The click therefore copies the
+  // session name/id to the clipboard first: paste into AO's Search (⌘K) to
+  // jump. When upstream AO ships session deep links, the same button becomes
+  // true navigation — the URL builder above already emits the handled shape.
+  const OPEN_IN_AO_HINT = "AO opens — paste the session id into Search (⌘K) to jump to it";
+
+  function openInAO(e, projectId, sessionId, displayName) {
+    e.preventDefault();
+    e.stopPropagation();
+    const text = displayName && displayName !== sessionId
+      ? displayName + " (" + sessionId + ")"
+      : sessionId;
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      // Copy failure (denied permission, unfocused tab) must not block the
+      // launch — the app still opens; the tooltip is the fallback instruction.
+      navigator.clipboard.writeText(text).catch(function () {});
+    }
+    window.location.href = aoDeepLink(projectId, sessionId);
+  }
+
+  function OpenInAO(props) {
+    return h("a", {
+      className: props.className || "ao-btn ao-btn-ghost ao-card-open",
+      href: aoDeepLink(props.projectId, props.sessionId),
+      title: OPEN_IN_AO_HINT,
+      onClick: function (e) {
+        openInAO(e, props.projectId, props.sessionId, props.displayName);
+      },
+    }, props.label || "Open in AO", h(ExtIcon));
   }
 
   function ExtIcon() {
@@ -294,12 +334,10 @@
       h(PrLinks, { prs: card.prs }),
       err ? h("div", { className: "ao-card-error" }, err) : null,
       h("div", { className: "ao-card-actions" },
-        h("a", {
-          className: "ao-btn ao-btn-ghost ao-card-open",
-          href: aoDeepLink(card.projectId, card.id),
-          title: "Open in Agent Orchestrator (ao:// deep link — hands off to the AO desktop app)",
-          onClick: function (e) { e.stopPropagation(); },
-        }, "Open in AO", h(ExtIcon)),
+        props.openLinks
+          ? h(OpenInAO, { projectId: card.projectId, sessionId: card.id,
+                          displayName: card.displayName })
+          : null,
         card.column !== "archive" && card.column !== "done"
           ? h("button", {
               className: "ao-btn ao-btn-ghost", disabled: !!busy,
@@ -333,9 +371,66 @@
             cards.length === 0
               ? h("div", { className: "ao-column-empty" }, "No sessions")
               : cards.map(function (c) {
-                  return h(Card, { key: c.id, card: c, iconMap: props.iconMap, onChanged: props.onChanged, onSend: props.onSend, onOpen: props.onOpen });
+                  return h(Card, { key: c.id, card: c, iconMap: props.iconMap, openLinks: props.openLinks, onChanged: props.onChanged, onSend: props.onSend, onOpen: props.onOpen });
                 })
           )
+    );
+  }
+
+  // --- Orchestrators strip -------------------------------------------------
+  // Orchestrator sessions (kind=orchestrator) coordinate workers; they don't
+  // carry worker state, so instead of polluting the Kanban columns they get
+  // one quiet strip above the board: a compact row per orchestrator (live
+  // dot, name, project, harness, display status, age, open-in-AO). Rows share
+  // the worker cards' filters and open the same detail sheet. Hidden entirely
+  // when nothing matches — it never announces an empty section.
+
+  // Liveness bucket for the strip's status dot (and the live-first sort).
+  function orchLiveness(card) {
+    const st = (card.status || "").toLowerCase();
+    if (st === "working") return "working";
+    if (INACTIVE_STATUSES[st]) return "inactive";
+    return "idle";
+  }
+
+  function OrchDot(props) {
+    const kind = orchLiveness(props.card);
+    const label = props.card.displayStatus || props.card.status || kind;
+    return h("span", {
+      className: "ao-orch-dot ao-orch-dot-" + kind,
+      title: label,
+      "aria-label": "status: " + label,
+    });
+  }
+
+  function OrchestratorStrip(props) {
+    const orchs = props.orchestrators;
+    return h("div", { className: "ao-orch-strip" },
+      h("div", { className: "ao-orch-head" },
+        h("span", { className: "ao-orch-title" }, "Orchestrators"),
+        h("span", { className: "ao-orch-count" }, orchs.length)),
+      h("div", { className: "ao-orch-rows" },
+        orchs.map(function (c) {
+          return h("div", {
+            key: c.id,
+            className: "ao-orch-row",
+            onClick: function () { props.onOpen(c); },
+            title: "Click for session detail",
+          },
+            h(OrchDot, { card: c }),
+            h("span", { className: "ao-orch-name", title: c.displayName }, c.displayName),
+            h(HarnessChip, { harness: c.harness, iconMap: props.iconMap }),
+            h("span", { className: "ao-orch-project", title: c.projectId || "standalone" }, c.project),
+            h("span", { className: "ao-orch-status" },
+              c.displayStatus || c.status || ""),
+            h("span", { className: "ao-orch-age", title: c.updatedAt }, timeAgo(c.updatedAt)),
+            props.openLinks
+              ? h(OpenInAO, { projectId: c.projectId, sessionId: c.id,
+                              displayName: c.displayName,
+                              className: "ao-chip ao-chip-pr ao-orch-open" })
+              : null);
+        })
+      )
     );
   }
 
@@ -670,11 +765,12 @@
       h("div", { className: "ao-sheet ao-sheet-detail" },
         h("div", { className: "ao-sheet-head" },
           h("div", { className: "ao-sheet-title" }, session.displayName),
-          h("a", {
-            className: "ao-btn ao-btn-ghost ao-open-ao",
-            href: aoDeepLink(projectId, session.id),
-            title: "Open in Agent Orchestrator (ao:// deep link — hands off to the AO desktop app)",
-          }, "Open in Agent Orchestrator", h(ExtIcon))),
+          props.openLinks
+            ? h(OpenInAO, { projectId: projectId, sessionId: session.id,
+                            displayName: session.displayName,
+                            className: "ao-btn ao-btn-ghost ao-open-ao",
+                            label: "Open in Agent Orchestrator" })
+            : null),
         !detail && !err ? h("div", { className: "ao-loading" }, "Loading session detail…") : null,
         err ? h("div", { className: "ao-sheet-error" }, err) : null,
         s ? h("div", { className: "ao-detail-meta" },
@@ -682,8 +778,7 @@
           h("div", { className: "ao-detail-row" }, h("span", { className: "ao-detail-key" }, "Project"), h("span", null, s.projectId || "standalone")),
           h("div", { className: "ao-detail-row" }, h("span", { className: "ao-detail-key" }, "Harness"), h("span", null, s.harness || "—")),
           h("div", { className: "ao-detail-row" }, h("span", { className: "ao-detail-key" }, "Branch"), h("span", { className: "ao-chip-branch" }, s.branch || "—")),
-          h("div", { className: "ao-detail-row" }, h("span", { className: "ao-detail-key" }, "Created"), h("span", null, timeAgo(s.createdAt) + (s.createdAt ? " (" + s.createdAt + ")" : ""))),
-          h("div", { className: "ao-detail-row" }, h("span", { className: "ao-detail-key" }, "AO link"), h("a", { className: "ao-chip-pr", href: s.aoLink }, s.aoLink))
+          h("div", { className: "ao-detail-row" }, h("span", { className: "ao-detail-key" }, "Created"), h("span", null, timeAgo(s.createdAt) + (s.createdAt ? " (" + s.createdAt + ")" : "")))
         ) : null,
         detail && detail.plan && detail.plan.steps && detail.plan.steps.length
           ? h("div", { className: "ao-detail-plan" },
@@ -796,9 +891,13 @@
     const [sendTarget, setSendTarget] = useState(null);
     const [detailTargetId, setDetailTargetId] = useState(null);
     // Derive the detail card from the live board so the sheet re-renders (and
-    // refetches, via the plan-writtenAt effect below) on WS pushes.
-    const detailCard = detailTargetId && data
-      ? (data.cards || []).find(function (c) { return c.id === detailTargetId; })
+    // refetches, via the plan-writtenAt effect below) on WS pushes. A click
+    // from either population (worker card or orchestrator row) lands here.
+    const allSessions = useMemo(function () {
+      return data ? (data.cards || []).concat(data.orchestrators || []) : [];
+    }, [data]);
+    const detailCard = detailTargetId
+      ? allSessions.find(function (c) { return c.id === detailTargetId; }) || null
       : null;
     const [query, setQuery] = useState("");
     const [statusFilter, setStatusFilter] = useState("all");
@@ -963,46 +1062,57 @@
       });
     }
 
+    // Status/harness options cover BOTH populations — the filters drive the
+    // worker columns and the orchestrators strip alike.
     const statusOptions = useMemo(function () {
       const seen = {};
-      (data && data.cards || []).forEach(function (c) {
+      allSessions.forEach(function (c) {
         const v = (c.displayStatus || c.status || "").toLowerCase();
         if (v) seen[v] = true;
       });
       return Object.keys(seen).sort();
-    }, [data]);
+    }, [allSessions]);
 
     const harnessOptions = useMemo(function () {
       const seen = {};
-      (data && data.cards || []).forEach(function (c) {
+      allSessions.forEach(function (c) {
         const v = (c.harness || "").trim();
         if (v) seen[v] = true;
       });
       return Object.keys(seen).sort();
-    }, [data]);
+    }, [allSessions]);
+
+    // One filter pass shared by both populations, so search and every
+    // dropdown/toggle behave identically for workers and orchestrators.
+    const matchesFilters = useCallback(function (c) {
+      const q = query.trim().toLowerCase();
+      if (q
+          && (c.project || "").toLowerCase().indexOf(q) === -1
+          && (c.displayName || "").toLowerCase().indexOf(q) === -1
+          && (c.harness || "").toLowerCase().indexOf(q) === -1) return false;
+      if (statusFilter !== "all"
+          && (c.displayStatus || c.status || "").toLowerCase() !== statusFilter) return false;
+      if (projectFilter !== "all" && (c.projectId || "") !== projectFilter) return false;
+      if (harnessFilter !== "all" && (c.harness || "").trim() !== harnessFilter) return false;
+      if (activeOnly && (c.column === "archive" || INACTIVE_STATUSES[(c.status || "").toLowerCase()])) return false;
+      const bucket = RECENCY_OPTIONS.find(function (r) { return r.id === recency; });
+      const cutoffMs = bucket && bucket.ms ? Date.now() - bucket.ms : 0;
+      if (cutoffMs) {
+        const ts = new Date(c.updatedAt || c.createdAt || "").getTime();
+        if (!isFinite(ts) || ts < cutoffMs) return false;
+      }
+      return true;
+    }, [query, statusFilter, projectFilter, harnessFilter, recency, activeOnly]);
 
     const columns = useMemo(function () {
       if (!data) return [];
-      const q = query.trim().toLowerCase();
-      const filter = statusFilter !== "all"
-        ? function (c) { return (c.displayStatus || c.status || "").toLowerCase() === statusFilter; }
-        : null;
-      const bucket = RECENCY_OPTIONS.find(function (r) { return r.id === recency; });
-      const cutoffMs = bucket && bucket.ms ? Date.now() - bucket.ms : 0;
       const buckets = {};
       (data.cards || []).forEach(function (c) {
-        if (q
-            && (c.project || "").toLowerCase().indexOf(q) === -1
-            && (c.displayName || "").toLowerCase().indexOf(q) === -1
-            && (c.harness || "").toLowerCase().indexOf(q) === -1) return;
-        if (filter && !filter(c)) return;
-        if (projectFilter !== "all" && (c.projectId || "") !== projectFilter) return;
-        if (harnessFilter !== "all" && (c.harness || "").trim() !== harnessFilter) return;
-        if (activeOnly && (c.column === "archive" || INACTIVE_STATUSES[(c.status || "").toLowerCase()])) return;
-        if (cutoffMs) {
-          const ts = new Date(c.updatedAt || c.createdAt || "").getTime();
-          if (!isFinite(ts) || ts < cutoffMs) return;
-        }
+        // Belt-and-braces: orchestrators must never re-enter the worker
+        // columns, even against an older backend that still ships them in
+        // `cards` (the current backend splits them out server-side).
+        if ((c.kind || "").toLowerCase() === "orchestrator") return;
+        if (!matchesFilters(c)) return;
         (buckets[c.column] = buckets[c.column] || []).push(c);
       });
       return (data.columns || []).map(function (col) {
@@ -1010,7 +1120,25 @@
         b.sort(function (a, b2) { return (b2.createdAt || "").localeCompare(a.createdAt || ""); });
         return { id: col.id, label: col.label, cards: b };
       });
-    }, [data, query, statusFilter, projectFilter, harnessFilter, recency, activeOnly]);
+    }, [data, matchesFilters]);
+
+    const orchestrators = useMemo(function () {
+      if (!data) return [];
+      const list = (data.orchestrators || (data.cards || []).filter(function (c) {
+        return (c.kind || "").toLowerCase() === "orchestrator";
+      })).filter(matchesFilters);
+      // Live orchestrators first, then by recency — terminated history sinks
+      // to the bottom instead of burying the ones actually coordinating.
+      list.sort(function (a, b) {
+        const la = orchLiveness(a), lb = orchLiveness(b);
+        if (la !== lb) {
+          const order = { working: 0, idle: 1, inactive: 2 };
+          return order[la] - order[lb];
+        }
+        return (b.updatedAt || "").localeCompare(a.updatedAt || "");
+      });
+      return list;
+    }, [data, matchesFilters]);
 
     return h("div", { className: "ao-bridge" },
       h("div", { className: "ao-header" },
@@ -1108,18 +1236,29 @@
                 h("div", { className: "ao-banner ao-banner-error" }, error || DAEMON_DOWN_MSG),
                 h("div", { className: "ao-board-error-hint" },
                   "The AO daemon has not answered yet. Retries continue automatically — the board appears here the moment the daemon does."))
-          : h("div", { className: "ao-board" },
-            columns.map(function (col) {
-              return h(Column, {
-                key: col.id, id: col.id, label: col.label, cards: col.cards,
-                iconMap: iconMap,
-                collapsed: col.id === "archive" && collapsed,
-                onToggle: col.id === "archive" ? toggleArchive : undefined,
-                onChanged: refresh, onSend: setSendTarget,
-                onOpen: function (card) { setDetailTargetId(card.id); },
-              });
-            })
-          ),
+          : [
+              // Orchestrators live in one quiet strip above the columns; the
+              // strip hides itself when no orchestrator matches the filters.
+              orchestrators.length
+                ? h(OrchestratorStrip, {
+                    orchestrators: orchestrators, iconMap: iconMap,
+                    openLinks: !!(data && data.openInAoLinks),
+                    onOpen: function (card) { setDetailTargetId(card.id); },
+                  })
+                : null,
+              h("div", { className: "ao-board" },
+                columns.map(function (col) {
+                  return h(Column, {
+                    key: col.id, id: col.id, label: col.label, cards: col.cards,
+                    iconMap: iconMap,
+                    openLinks: !!(data && data.openInAoLinks),
+                    collapsed: col.id === "archive" && collapsed,
+                    onToggle: col.id === "archive" ? toggleArchive : undefined,
+                    onChanged: refresh, onSend: setSendTarget,
+                    onOpen: function (card) { setDetailTargetId(card.id); },
+                  });
+                })),
+            ],
       spawnOpen
         ? h(SpawnForm, {
             projects: (data && data.projects) || [], harnesses: (data && data.harnesses) || ["hermes"],
@@ -1144,6 +1283,7 @@
       detailCard
         ? h(DetailSheet, {
             session: detailCard,
+            openLinks: !!(data && data.openInAoLinks),
             onClose: function () { setDetailTargetId(null); },
           })
         : null

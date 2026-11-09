@@ -157,13 +157,13 @@ class DeepLinkTest(unittest.TestCase):
         # Route-level round-trip of exotic ids is Starlette's business; what
         # this plugin owns is that the built link never contains a raw '/', '?'
         # or '#' inside a segment.
-        self.assertEqual(plugin_api.ao_deep_link("", "s2"), "ao://sessions/s2")
+        self.assertEqual(plugin_api.ao_deep_link("", "s2"), "ao-app://sessions/s2")
         self.assertEqual(plugin_api.ao_deep_link("hermes-agent", "s2"),
-                         "ao://sessions/hermes-agent/s2")
+                         "ao-app://sessions/hermes-agent/s2")
         self.assertEqual(plugin_api.ao_deep_link("a/b", "c/d"),
-                         "ao://sessions/a%2Fb/c%2Fd")
+                         "ao-app://sessions/a%2Fb/c%2Fd")
         self.assertEqual(plugin_api.ao_deep_link("p#1", "s?2 x"),
-                         "ao://sessions/p%231/s%3F2%20x")
+                         "ao-app://sessions/p%231/s%3F2%20x")
 
 
 if __name__ == "__main__":

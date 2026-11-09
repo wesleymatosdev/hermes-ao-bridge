@@ -45,6 +45,14 @@ log = logging.getLogger("ao-bridge")
 PLUGIN_ID = "ao-bridge"
 DEFAULT_BASE_URL = "http://127.0.0.1:3001"
 
+# URL scheme of the "open this session in the AO desktop app" deep links.
+# Verified against the installed AO app's Info.plist (CFBundleURLTypes,
+# 0.14.11-nightly): it registers ONLY "ao-app" (declared as the orchestrator
+# authentication callback), so plain "ao://" links never reach the app. If a
+# future build registers "ao://" or handles session paths differently, this
+# constant is the one place to change.
+AO_DEEP_LINK_SCHEME = "ao-app"
+
 
 def _manifest_version() -> str:
     """Version from the manifest NEXT TO THIS FILE, read once at import.
@@ -124,6 +132,31 @@ def ao_base_url() -> str:
     if from_env:
         return from_env.rstrip("/")
     return DEFAULT_BASE_URL
+
+
+_TRUTHY = ("1", "true", "yes", "on")
+
+
+def open_in_ao_links() -> bool:
+    """Show the "Open in AO" deep-link buttons?
+
+    OFF by default, deliberately: AO's open-url handler does not route session
+    deep links yet (verified at AO source, 2026-11-09 — it only knows the
+    orchestrator auth callback and billing hosts; session URLs are dropped), so
+    the buttons would focus the app without navigating to the session. The
+    ``ao-app://`` builder stays in the code; re-enabling is this config flip,
+    not a code dive, once upstream AO registers ``ao://`` or handles session
+    paths on ``ao-app://``.
+    """
+    from_config = _config_setting("open_in_ao_links")
+    if from_config:
+        return from_config.lower() in _TRUTHY
+    # Env override mirrors AO_BRIDGE_BASE_URL — dev/test parity with the
+    # dashboard's config-backed setting.
+    env = (os.environ.get("AO_BRIDGE_OPEN_LINKS") or "").strip().lower()
+    if env:
+        return env in _TRUTHY
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -392,12 +425,18 @@ def _attach_plans(cards: list, ao: AOClient) -> None:
 
 
 def board_snapshot(ao: Optional[AOClient] = None) -> dict:
-    """One round-trip pair (projects + sessions) reduced to everything the UI draws."""
+    """One round-trip pair (projects + sessions) reduced to everything the UI draws.
+
+    Orchestrator sessions (``kind == "orchestrator"`` — they coordinate workers,
+    they don't carry worker state) are split into ``orchestrators`` so the
+    worker columns and their counters stay meaningful."""
     ao = ao or client()
     projects = ao.projects()
     project_names = {p.get("id"): (p.get("name") or p.get("id")) for p in projects if p.get("id")}
-    cards = [card_for(s, project_names) for s in ao.sessions()]
-    _attach_plans(cards, ao)
+    all_cards = [card_for(s, project_names) for s in ao.sessions()]
+    _attach_plans(all_cards, ao)
+    cards = [c for c in all_cards if (c.get("kind") or "worker") != "orchestrator"]
+    orchestrators = [c for c in all_cards if c.get("kind") == "orchestrator"]
     by_column = {c: [] for c in COLUMN_ORDER}
     for card in cards:
         by_column.setdefault(card["column"], []).append(card)
@@ -415,6 +454,8 @@ def board_snapshot(ao: Optional[AOClient] = None) -> dict:
             for p in projects if p.get("id")
         ],
         "cards": cards,
+        "orchestrators": orchestrators,
+        "openInAoLinks": open_in_ao_links(),
         "counts": {c: len(by_column[c]) for c in by_column},
     }
 
@@ -619,12 +660,14 @@ def tool_activities(conv: dict) -> dict:
 
 
 def ao_deep_link(project_id: str, session_id: str) -> str:
-    """Canonical ao:// deep link; each path segment percent-encoded so ids
-    containing '/', '?' or '#' cannot reshape the link."""
+    """Canonical AO desktop-app deep link (scheme: ``AO_DEEP_LINK_SCHEME``);
+    each path segment percent-encoded so ids containing '/', '?' or '#' cannot
+    reshape the link."""
     sid = urllib.parse.quote(str(session_id), safe="")
     if project_id:
-        return f"ao://sessions/{urllib.parse.quote(str(project_id), safe='')}/{sid}"
-    return f"ao://sessions/{sid}"
+        return (f"{AO_DEEP_LINK_SCHEME}://sessions/"
+                f"{urllib.parse.quote(str(project_id), safe='')}/{sid}")
+    return f"{AO_DEEP_LINK_SCHEME}://sessions/{sid}"
 
 
 def detail_payload(ao: AOClient, session_id: str) -> dict:

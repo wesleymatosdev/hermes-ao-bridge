@@ -3,10 +3,10 @@
 ao-bridge is a [Hermes](https://github.com/NousResearch/hermes-agent) dashboard
 plugin that turns the local [Agent Orchestrator (AO)](https://github.com/OrchestratorInc/agent-orchestrator)
 daemon into a live Kanban board: every AO project's sessions render as cards
-across six columns, you can spawn new workers, message running ones, open a
-session's transcript as a chat, and jump into the AO desktop app from any card.
-The plugin runs nothing itself — it mirrors the daemon, which does the actual
-agent work.
+across six columns (orchestrator sessions get a quiet strip of their own above
+the board), you can spawn new workers, message running ones, and open a
+session's transcript as a chat. The plugin runs nothing itself — it mirrors
+the daemon, which does the actual agent work.
 
 ![AO Bridge board](docs/screenshots/ao-bridge-board.png)
 
@@ -84,10 +84,26 @@ full command, input or output (outputs capped at 4,000 characters, last 400
 activities). The worker's plan renders as a checklist in the sheet and as a
 one-line "current step" on working cards.
 
-**Open in Agent Orchestrator.** Every card and the detail sheet carry the
-canonical `ao://sessions/{projectId}/{sessionId}` deep link, handing off to
-the AO desktop app. The app must have registered the `ao` URL scheme — some
-nightlies register only `ao-app`, in which case the link won't resolve.
+**Orchestrators.** AO orchestrator sessions (they coordinate workers; they
+don't carry worker state) never enter the Kanban columns or their counters.
+They get one quiet strip above the board instead — a compact row each with a
+live status dot, name, project, harness, display status and age; live
+orchestrators sort first and terminated history sinks to the bottom
+(scrollable, capped). Rows share every filter with the worker cards and open
+the same detail sheet. The strip hides itself when no orchestrator matches
+the filters.
+
+**Open in AO — interim workaround, off by default.** The AO desktop app
+doesn't route session deep links yet (its open-url handler only knows the
+orchestrator auth callback and billing hosts — session deep links are coming
+to AO, upstream work in progress). With
+`plugins.entries.ao-bridge.settings.open_in_ao_links: true` in config.yaml,
+cards, orchestrator rows and the detail sheet show an **Open in AO** button:
+it opens/focuses the AO app and copies the session id to your clipboard —
+paste it into AO's Search (⌘K) to jump to the session. That's the interim
+flow until true deep links land; the `ao-app://sessions/…` builder already
+sits behind a single scheme constant in both backend and frontend, so when
+AO handles session paths the same button becomes real navigation.
 
 **Daemon-outage resilience.** When the AO daemon goes down, the board keeps
 the last-known state under an "AO daemon unreachable — retrying…" banner with

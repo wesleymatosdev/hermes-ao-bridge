@@ -244,9 +244,131 @@
 
 .ao-card-actions {
   display: flex;
+  flex-wrap: wrap;
   gap: 6px;
   justify-content: flex-end;
 }
+
+/* --- orchestrators strip -------------------------------------------------- */
+/* One quiet section above the columns for kind=orchestrator sessions: a
+   compact row each, live-first, hidden entirely when nothing matches. */
+
+.ao-orch-strip {
+  margin-bottom: 14px;
+  background: var(--ao-bg-panel);
+  border: 1px solid var(--ao-border);
+  border-radius: 14px;
+  backdrop-filter: blur(6px);
+}
+
+.ao-orch-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px 6px;
+}
+
+.ao-orch-title {
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: #a5b4fc;
+}
+
+.ao-orch-count {
+  font-size: 11px;
+  color: var(--ao-text-dim);
+  background: rgba(124, 108, 255, 0.14);
+  border: 1px solid var(--ao-border);
+  border-radius: 999px;
+  padding: 1px 8px;
+}
+
+.ao-orch-rows {
+  display: flex;
+  flex-direction: column;
+  padding: 2px 6px 8px;
+  /* Terminated history under "Show all" can run long; scroll, don't push the
+     whole board off-screen. */
+  max-height: 180px;
+  overflow-y: auto;
+}
+
+.ao-orch-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 5px 8px;
+  border-radius: 9px;
+  font-size: 12px;
+  cursor: pointer;
+  min-width: 0;
+}
+.ao-orch-row:hover { background: rgba(124, 108, 255, 0.10); }
+
+.ao-orch-dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+.ao-orch-dot-working {
+  background: var(--ao-accent-2);
+  box-shadow: 0 0 8px rgba(56, 189, 248, 0.9);
+  animation: ao-orch-pulse 1.6s ease-in-out infinite;
+}
+.ao-orch-dot-idle {
+  background: var(--ao-good);
+  box-shadow: 0 0 6px rgba(52, 211, 153, 0.55);
+}
+.ao-orch-dot-inactive {
+  background: rgba(139, 147, 200, 0.45);
+}
+@keyframes ao-orch-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+
+.ao-orch-name {
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 220px;
+}
+.ao-orch-row .ao-chip-harness { flex: none; }
+
+.ao-orch-project {
+  flex: none;
+  font-size: 10.5px;
+  color: var(--ao-accent-2);
+  background: rgba(56, 189, 248, 0.10);
+  border: 1px solid rgba(56, 189, 248, 0.25);
+  border-radius: 999px;
+  padding: 1px 8px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 180px;
+}
+
+.ao-orch-status {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--ao-text-dim);
+}
+
+.ao-orch-age {
+  flex: none;
+  font-size: 11px;
+  color: var(--ao-text-dim);
+}
+
+.ao-orch-open { margin-left: auto; flex: none; }
 
 /* --- buttons ------------------------------------------------------------- */
 
@@ -738,7 +860,7 @@
   50% { opacity: 0.35; }
 }
 
-/* --- ao:// deep links (Open in Agent Orchestrator) ------------------------ */
+/* --- AO deep links (Open in Agent Orchestrator) --------------------------- */
 
 .ao-sheet-head {
   display: flex;
@@ -765,6 +887,11 @@ a.ao-btn.ao-open-ao {
   border-color: rgba(56, 189, 248, 0.35);
   font-size: 11.5px;
   padding: 4px 10px;
+  /* Narrow cards: three actions don't fit one row — keep the label on one
+     line and let .ao-card-actions wrap to a second row instead of the label
+     wrapping inside the button (it overflowed the card edge). */
+  flex: none;
+  white-space: nowrap;
 }
 a.ao-btn.ao-card-open:hover,
 a.ao-btn.ao-open-ao:hover { background: rgba(56, 189, 248, 0.10); }

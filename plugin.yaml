@@ -1,5 +1,5 @@
 name: ao-bridge
-version: 0.3.6
+version: 0.3.7
 label: AO Bridge
 description: Agent Orchestrator bridge — a Kanban board over the local AO daemon (projects, sessions, spawn, send)
 author: Wesley Matos
@@ -12,6 +12,10 @@ config_schema:
     type: str
     default: http://127.0.0.1:3001
     description: Base URL of the local AO daemon REST API (loopback)
+  open_in_ao_links:
+    type: bool
+    default: false
+    description: Show the "Open in AO" deep-link buttons. Off by default — AO's open-url handler doesn't route session deep links yet (the app focuses but doesn't navigate); flip on once upstream AO handles session paths
   relay_enabled:
     type: bool
     default: false
