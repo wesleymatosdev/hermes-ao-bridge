@@ -46,17 +46,22 @@
   const THEME_STORAGE_KEY = "ao-bridge.theme";
   const DEFAULT_THEME = "nebula";
   const THEMES = [
-    { id: "nebula", label: "Nebula Classic" },
-    { id: "waves", label: "Waves Discovery" },
-    { id: "editorial", label: "Light Editorial" },
-    { id: "aurora", label: "Dark Aurora" },
-    { id: "glass", label: "Liquid Glass" },
-    { id: "air", label: "Air" },
+    { id: "nebula", label: "Nebula" },
+    { id: "editorial", label: "Editorial" },
+    { id: "aurora", label: "Aurora" },
+    { id: "glass", label: "Glass" },
+    { id: "sky", label: "Sky" },
   ];
-  // Anything unknown in storage (first run, a renamed id, hand-edited
+  // Ids persisted by older releases: mapped to their current id, or dropped
+  // to the default when the theme was removed. "air" → "sky" (v0.8.4
+  // rename); "waves" / "waves-discovery" were REMOVED in v0.8.4 and fall
+  // back to nebula via the unknown-id path below.
+  const LEGACY_THEME_IDS = { air: "sky" };
+  // Anything unknown in storage (first run, a removed id, hand-edited
   // localStorage) falls back to the default instead of breaking the board.
   function normalizeTheme(id) {
-    return THEMES.some(function (t) { return t.id === id; }) ? id : DEFAULT_THEME;
+    const mapped = LEGACY_THEME_IDS[id] || id;
+    return THEMES.some(function (t) { return t.id === mapped; }) ? mapped : DEFAULT_THEME;
   }
   function readStoredTheme() {
     try { return normalizeTheme(window.localStorage.getItem(THEME_STORAGE_KEY)); }

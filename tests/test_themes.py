@@ -44,8 +44,12 @@ const out = {};
 out.normalize_unknown = normalizeTheme("does-not-exist");
 out.normalize_null = normalizeTheme(null);
 out.normalize_valid = normalizeTheme("aurora");
+// v0.8.4 renames: removed ids fall back to the default; renamed ids alias.
+out.normalize_removed_waves = normalizeTheme("waves");
+out.normalize_removed_full = normalizeTheme("waves-discovery");
+out.normalize_legacy_air = normalizeTheme("air");
 out.themes_offered = THEMES.map((t) => t.id);
-writeStoredTheme("waves");
+writeStoredTheme("editorial");
 out.read_back = readStoredTheme();
 writeStoredTheme("garbage");           // normalized before persisting
 out.read_back_after_bad_write = readStoredTheme();
@@ -88,7 +92,7 @@ class ThemeSelectionTest(unittest.TestCase):
 
     def test_selection_persists_and_reads_back(self):
         out = run_harness("ok")
-        self.assertEqual(out["read_back"], "waves")
+        self.assertEqual(out["read_back"], "editorial")
         # A garbage write is normalized BEFORE persisting: storage never
         # holds an invalid id from our code (it lands on the default).
         self.assertEqual(out["read_back_after_bad_write"], "nebula")
@@ -105,10 +109,25 @@ class ThemeSelectionTest(unittest.TestCase):
         self.assertEqual(out["read_back"], "nebula")
         self.assertEqual(out["read_corrupt"], "nebula")
 
-    def test_picker_offers_all_six_themes(self):
+    def test_picker_offers_all_five_themes(self):
+        # v0.8.4 rename/removal: nebula, editorial, aurora, glass, sky.
         out = run_harness("ok")
         self.assertEqual(out["themes_offered"],
-                         ["nebula", "waves", "editorial", "aurora", "glass", "air"])
+                         ["nebula", "editorial", "aurora", "glass", "sky"])
+
+    def test_removed_waves_falls_back_to_nebula(self):
+        # waves-discovery was REMOVED in v0.8.4. Both persisted spellings
+        # (the old id "waves" and the artifact name "waves-discovery") must
+        # land cleanly on the default, never break the board.
+        out = run_harness("ok")
+        self.assertEqual(out["normalize_removed_waves"], "nebula")
+        self.assertEqual(out["normalize_removed_full"], "nebula")
+
+    def test_legacy_air_id_aliases_to_sky(self):
+        # air was RENAMED to sky in v0.8.4: a persisted "air" keeps the
+        # Sky theme via the legacy alias instead of dropping to nebula.
+        out = run_harness("ok")
+        self.assertEqual(out["normalize_legacy_air"], "sky")
 
 
 class ThemeCssContractTest(unittest.TestCase):

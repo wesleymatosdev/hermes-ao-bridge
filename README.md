@@ -246,12 +246,15 @@ properties declared on the board root, so a theme is one token block in
 
 | Theme | Feel |
 |---|---|
-| **Nebula Classic** *(default)* | The original galaxy-dark board — violet/cyan on deep space. |
-| **Waves Discovery** | Dark neutral OKLCH, one rose accent, teal for anything live. Dense and flat. |
-| **Light Editorial** | Paper surfaces, ink text, hairline rules, radius 0, one vermilion accent, serif display voice. |
-| **Dark Aurora** | Near-black glass panels behind a teal→indigo→magenta aurora wash. |
-| **Liquid Glass** | Frosted translucent panels over a colorful ambient backdrop, specular edges. Blur lives on the big surfaces only — cards skip per-card `backdrop-filter` so 300+ cards still scroll cleanly. |
-| **Air** | The light counterpart of Liquid Glass, from the atmosphere of air.inc: bright sky gradient with soft clouds, translucent white-glass panels, dark ink text, and one vivid lime accent marking whatever is alive (working cards, running dots, plan pulse). Static gradients only — same perf stance as Liquid Glass. |
+| **Nebula** *(default)* | The original galaxy-dark board — violet/cyan on deep space. |
+| **Editorial** | Paper surfaces, ink text, hairline rules, radius 0, one vermilion accent, serif display voice. |
+| **Aurora** | Near-black glass panels behind a teal→indigo→magenta aurora wash. |
+| **Glass** | Frosted translucent panels over a colorful ambient backdrop, specular edges. Blur lives on the big surfaces only — cards skip per-card `backdrop-filter` so 300+ cards still scroll cleanly. |
+| **Sky** *(formerly Air)* | The light counterpart of Glass, from the atmosphere of air.inc: bright sky gradient with soft clouds, translucent white-glass panels, dark ink text, and one vivid lime accent marking whatever is alive (working cards, running dots, plan pulse). Static gradients only — same perf stance as Glass. |
+
+Themes renamed in v0.8.4; **Waves Discovery was removed** — a persisted
+`waves` id falls back to Nebula cleanly, and a persisted `air` id keeps the
+Sky theme via a legacy alias.
 
 > **Roadmap — light/dark variants per theme (known next step, deferred):**
 > each theme should eventually offer light and dark variations. The token
