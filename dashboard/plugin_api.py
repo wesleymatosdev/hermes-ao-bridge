@@ -833,29 +833,42 @@ async def events(ws: WebSocket):
 # Wesley's use case: worker completions/stalls from AO only arrive on the
 # orchestrator's AO-embedded conversation; when he chats with Hermes elsewhere
 # they never reach him. The relay watches the daemon on a backend-owned poll
-# loop and injects compact one-line milestones into ONE Hermes session chosen
-# by explicit config (``relay_session``), through the same sanctioned store
-# path async delegation completions use (``SessionDB.append_delegation_delivery``
-# — a durable user-role delivery row, folded into the session's next turn as
-# context and visible to transcript viewers immediately). No platform sends,
-# no secrets, no Telegram/Discord configuration: the target is a session id
-# and the transport is entirely Hermes core. The injected row becomes part of
-# that conversation — the agent sees it on the next turn and may act on it;
-# it does not itself wake an idle session.
+# loop and delivers compact one-line milestones as LIVE turns into the
+# destination session's conversation — resolved PER EVENT from AO's own
+# orchestrator mapping (the project's live kind=orchestrator session, whose
+# Hermes conversation is identified by its cwd marker
+# ``/worktrees/<project>/orchestrator/``), so different workers can belong to
+# different orchestrators. Delivery rides the gateway's own api_server
+# session-chat route (``POST /api/sessions/{id}/chat`` — the sanctioned
+# immediate-submission path ``hermes peer dm`` drives), authenticated with a
+# Hermes-held secret: a named peer's scoped key (``relay_peer``) or
+# API_SERVER_KEY. No platform sends, no secrets in plugin config: the event
+# WAKES the destination session immediately (a live turn — costs the session
+# a model turn; batching/debounce keeps it one turn per burst), and the
+# conversation's bound surfaces render the exchange. ``relay_session`` is an
+# explicit override for unmappable cases only.
 #
 # Why poll + diff rather than the daemon's event stream: the loopback REST API
-# is the surface this plugin is already built on (no credentials), while the
-# daemon's stream endpoints are either off-surface (WS on the paired port,
-# connection-password gated) or firehose-shaped (SSE /api/v1/events carries
-# only {"id"} per event and emits thousands of updates/minute on a busy
-# machine). A 5s diff-poll of sessions + per-project reports yields exactly
-# the transitions the relay cares about, dedupable by stable ids.
+# is the surface this plugin is already built on, while the daemon's stream
+# endpoints are either off-surface (WS on the paired port, connection-password
+# gated) or firehose-shaped (SSE /api/v1/events carries only {"id"} per event
+# and emits thousands of updates/minute on a busy machine). A 5s diff-poll of
+# sessions + per-project reports yields exactly the transitions the relay
+# cares about, dedupable by stable ids.
 # ---------------------------------------------------------------------------
 
 RELAY_POLL_SECONDS = 5.0
 RELAY_DEBOUNCE_SECONDS = 5.0
 RELAY_BATCH_MAX_LINES = 8
 RELAY_NOTE_LIMIT = 140
+# The gateway's api_server listener — the surface ``hermes peer dm`` drives
+# with POST /api/sessions/{id}/chat. The relay submits its batches there so an
+# event becomes a live turn in the destination session (wakes it immediately)
+# instead of a store row that only lands at the session's next turn.
+RELAY_API_URL_DEFAULT = "http://127.0.0.1:8642"
+# One synchronous agent turn can legitimately take minutes — the same ceiling
+# ``hermes peer dm`` uses.
+RELAY_CHAT_TIMEOUT_S = 600
 
 RELAY_REPORT_STATES = ("done", "checkpoint", "stuck", "needs_input")
 RELAY_SESSION_FROM = "working"
@@ -873,10 +886,12 @@ RELAY_SEEN_TTL_SECONDS = 24 * 3600.0
 
 
 class RelayEvent:
-    __slots__ = ("kind", "worker", "detail")
+    __slots__ = ("kind", "worker", "detail", "ao_session_id", "project_id")
 
-    def __init__(self, kind: str, worker: str, detail: str = ""):
+    def __init__(self, kind: str, worker: str, detail: str = "",
+                 ao_session_id: str = "", project_id: str = ""):
         self.kind, self.worker, self.detail = kind, worker, detail
+        self.ao_session_id, self.project_id = ao_session_id, project_id
 
 
 def _one_line(text: str, limit: int) -> str:
@@ -908,7 +923,8 @@ def report_events(reports: list, seen: dict, kinds, names: Optional[dict] = None
             continue
         sid = rpt.get("sessionId") or ""
         worker = (names or {}).get(sid) or sid or "?"
-        events.append(RelayEvent(kind, worker, str(rpt.get("note") or "")))
+        events.append(RelayEvent(kind, worker, str(rpt.get("note") or ""),
+                                 ao_session_id=sid, project_id=str(rpt.get("projectId") or "")))
     for key in [k for k, ts in seen.items() if now - ts > RELAY_SEEN_TTL_SECONDS]:
         del seen[key]
     return events
@@ -934,7 +950,8 @@ def session_events(sessions: list, prev_status: dict, kinds) -> list:
         kind = RELAY_SESSION_STATUSES.get(status)
         if kind is None or kind not in kinds or previous != RELAY_SESSION_FROM:
             continue
-        events.append(RelayEvent(kind, str(sess.get("displayName") or sid), ""))
+        events.append(RelayEvent(kind, str(sess.get("displayName") or sid), "",
+                                 ao_session_id=sid, project_id=str(sess.get("projectId") or "")))
     for gone in [sid for sid in prev_status if sid not in live_ids]:
         del prev_status[gone]
     return events
@@ -995,15 +1012,18 @@ class RelayBatcher:
 
 
 class RelaySettings:
-    __slots__ = ("enabled", "session_id", "events")
+    __slots__ = ("enabled", "override_session", "events", "api_url", "peer")
 
-    def __init__(self, enabled: bool, session_id: str, events: set):
-        self.enabled, self.session_id, self.events = enabled, session_id, events
+    def __init__(self, enabled: bool, override_session: str, events: set,
+                 api_url: str, peer: str):
+        self.enabled, self.override_session, self.events = enabled, override_session, events
+        self.api_url, self.peer = api_url, peer
 
 
 def read_relay_settings() -> RelaySettings:
-    """relay.* plugin settings; defaults are OFF and explicit — the relay
-    never runs, and never picks a session, without the user naming one."""
+    """relay.* plugin settings; defaults are OFF, and the destination is
+    resolved per event from AO's own orchestrator mapping. ``relay_session``
+    is only an explicit override for unmappable cases."""
     enabled = _config_raw("relay_enabled")
     events_raw = _config_raw("relay_events")
     if isinstance(events_raw, (list, tuple)):
@@ -1011,10 +1031,13 @@ def read_relay_settings() -> RelaySettings:
     else:
         parsed = {part.strip() for part in str(events_raw or "").split(",")} - {""}
     events = parsed & set(DEFAULT_RELAY_EVENTS) if parsed else set(DEFAULT_RELAY_EVENTS)
+    api_url = str(_config_raw("relay_api_url") or "").strip().rstrip("/") or RELAY_API_URL_DEFAULT
     return RelaySettings(
         enabled=str(enabled).strip().lower() in ("1", "true", "yes", "on"),
-        session_id=str(_config_raw("relay_session") or "").strip(),
+        override_session=str(_config_raw("relay_session") or "").strip(),
         events=events,
+        api_url=api_url,
+        peer=str(_config_raw("relay_peer") or "").strip(),
     )
 
 
@@ -1033,9 +1056,9 @@ def _config_raw(key: str):
 
 
 def _open_session_db():
-    """SessionDB for the relay's delivery rows; None outside a Hermes install
-    (bare test harnesses) — the relay then fails closed, it never improvises a
-    transport. The DB is Hermes's own store in the process's profile home."""
+    """SessionDB (read use) for resolving the destination session; None
+    outside a Hermes install (bare test harnesses) — the relay then fails
+    closed on unmappable events, it never guesses a target."""
     try:
         from hermes_state import SessionDB  # type: ignore
     except Exception:
@@ -1046,41 +1069,152 @@ def _open_session_db():
         return None
 
 
-def _delegation_id_for(text: str) -> str:
-    """Content-stable dedup key: the same batch delivered twice (a retry after
-    a crash between write and state update) lands on the existing row instead
-    of duplicating the turn."""
-    return "ao-bridge:" + hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
-
-
-def deliver_relay_batch(session_id: str, text: str) -> dict:
-    """Inject one batch into the Hermes session as a durable delivery row —
-    the same store path an async delegation completion takes. Retryable
-    failures (a live turn refuses the inter-turn write) return
-    ``{"ok": False, "retryable": True}`` so the worker keeps the batch."""
-    if not session_id:
-        return {"ok": False, "retryable": False, "error": "no relay_session configured"}
-    db = _open_session_db()
-    if db is None:
-        return {"ok": False, "retryable": False, "error": "Hermes session store unavailable"}
+def _relay_secret(name: str) -> str:
+    """One Hermes secret by name, through the same scoped read ``hermes peer``
+    uses (secret store first, raw env fallback). Empty when unavailable —
+    never a plugin-config value, because there are none."""
     try:
-        resolver = getattr(db, "resolve_resume_session_id", None)
-        resolved = callable(resolver) and resolver(session_id)
-        row_id = db.append_delegation_delivery(
-            resolved or session_id, text,
-            {"delegation_id": _delegation_id_for(text),
-             "delivery_notice": "ao-bridge relay", "origin": "ao-bridge"},
-        )
-        return {"ok": True, "rowId": row_id, "sessionId": resolved or session_id,
-                "delegationId": _delegation_id_for(text)}
-    except Exception as exc:
-        return {"ok": False, "retryable": True, "error": str(exc)}
+        from agent.secret_scope import get_secret  # type: ignore
+        return (get_secret(name, "") or "").strip()
+    except Exception:
+        return (os.environ.get(name) or "").strip()
+
+
+def _relay_api_key(settings: RelaySettings) -> str:
+    """Credential for the api_server chat route: a named peer's scoped key
+    (``relay_peer`` -> ``HERMES_PEER_<NAME>_KEY``, exactly what ``hermes peer``
+    resolves) when configured, else the gateway's own API_SERVER_KEY."""
+    if settings.peer:
+        env_name = f"HERMES_PEER_{settings.peer.upper().replace('-', '_')}_KEY"
+        key = _relay_secret(env_name)
+        if key:
+            return key
+    return _relay_secret("API_SERVER_KEY")
+
+
+def _post_session_chat(api_url: str, key: str, session_id: str, text: str) -> dict:
+    """POST one batch as a live turn into ``session_id`` via the gateway's
+    api_server session-chat route — the sanctioned immediate-submission path
+    (``hermes peer dm`` drives the same route). Returns
+    ``{"ok": True}`` or ``{"ok": False, "retryable": bool, "error": str}``."""
+    url = f"{api_url}/api/sessions/{urllib.parse.quote(session_id, safe='')}/chat"
+    data = json.dumps({"message": text}).encode("utf-8")
+    req = urllib.request.Request(url, data=data, method="POST", headers={
+        "Authorization": f"Bearer {key}", "Content-Type": "application/json",
+        "User-Agent": "ao-bridge-relay"})
+    try:
+        with urllib.request.urlopen(req, timeout=RELAY_CHAT_TIMEOUT_S) as resp:
+            body = resp.read()
+    except urllib.error.HTTPError as err:
+        try:
+            detail = json.loads(err.read() or b"{}")
+            message = detail.get("error", {}).get("message") or detail.get("message") or err.reason
+        except (ValueError, AttributeError):
+            message = err.reason
+        # 429 (global concurrency cap) and 5xx clear on their own; auth and
+        # a missing session do not.
+        return {"ok": False, "retryable": err.code == 429 or err.code >= 500,
+                "error": f"chat route {err.code}: {message}"}
+    except (urllib.error.URLError, OSError) as err:
+        # Gateway api_server down: retryable, the loop tries the next tick.
+        return {"ok": False, "retryable": True, "error": f"gateway api unreachable: {err}"}
+    if not body:
+        return {"ok": True}
+    try:
+        payload = json.loads(body)
+    except ValueError:
+        return {"ok": True}
+    status = str(payload.get("status") or "")
+    if status and status not in ("completed", "success", "ok"):
+        return {"ok": False, "retryable": False,
+                "error": f"turn ended with status {status!r}"}
+    return {"ok": True}
+
+
+def deliver_relay_batch(session_id: str, text: str, settings: RelaySettings) -> dict:
+    """Wake the destination session NOW: submit the batch as a live turn
+    through the api_server chat route. A delivered event costs the session a
+    model turn — that is the point (the steering rejected next-turn-only
+    store rows); batching/debounce keeps the cost per burst, not per event."""
+    if not session_id:
+        return {"ok": False, "retryable": False, "error": "no destination session"}
+    key = _relay_api_key(settings)
+    if not key:
+        return {"ok": False, "retryable": False,
+                "error": "no relay credential (API_SERVER_KEY unset; no relay_peer key)"}
+    return _post_session_chat(settings.api_url, key, session_id, text)
+
+
+def _live_orchestrator_for_project(ao, project_id: str) -> tuple:
+    """The project's live AO orchestrator session: ``(session_id, "")`` when
+    exactly one, ``(None, reason)`` when none or ambiguous. AO exposes the
+    orchestrator/worker kinds on its REST rows; the desktop app's own report
+    routing keys off the same kind."""
+    try:
+        sessions = [s for s in ao.sessions() if isinstance(s, dict)
+                    and s.get("projectId") == project_id and s.get("kind") == "orchestrator"
+                    and not s.get("isTerminated")]
+    except AOApiError:
+        return None, "ao daemon unreachable"
+    live = [s for s in sessions if (s.get("status") or "") != "terminated"]
+    if not live:
+        return None, f"no live orchestrator session for project {project_id!r}"
+    if len(live) > 1:
+        # Several orchestrators share the project: relaying into one of them
+        # would guess. The override exists for exactly this.
+        return None, f"{len(live)} live orchestrators for project {project_id!r} — ambiguous"
+    live.sort(key=lambda s: s.get("updatedAt") or "", reverse=True)
+    return str(live[0].get("id")), ""
+
+
+def _hermes_orchestrator_session(db, project_id: str) -> str:
+    """The Hermes session backing the project's orchestrator conversation:
+    AO runs it with cwd under ``<worktrees>/<project>/orchestrator/`` (seen on
+    this machine's live sessions), so the cwd marker — not the volatile display
+    name — identifies it. Most-recently-active live session wins."""
+    if db is None:
+        return ""
+    marker = f"/worktrees/{project_id}/orchestrator/"
+    try:
+        rows = db.list_sessions_rich(source="local", limit=200,
+                                     order_by_last_active=True, compact_rows=True)
+    except Exception:
+        return ""
+    for row in rows:
+        cwd = str(row.get("cwd") or "")
+        if marker not in cwd:
+            continue
+        if row.get("end_reason"):
+            continue
+        return str(row.get("id") or "")
+    return ""
+
+
+def resolve_relay_destination(project_id: str, ao, settings: RelaySettings, db) -> tuple:
+    """Where one event goes: the project's live orchestrator conversation,
+    resolved per event (different workers may belong to different
+    orchestrators). ``(session_id, "")`` or ``(None, reason)``; the explicit
+    ``relay_session`` override catches every unmappable case — no live
+    orchestrator, an ambiguous one, or one without a live conversation."""
+    mapped, _ao_id = _live_orchestrator_for_project(ao, project_id)
+    if mapped:
+        session = _hermes_orchestrator_session(db, project_id)
+        if session:
+            return session, ""
+        reason = (f"orchestrator {mapped} has no live Hermes conversation "
+                  f"(no session cwd under /worktrees/{project_id}/orchestrator/)")
+    else:
+        reason = _ao_id
+    if settings.override_session:
+        return settings.override_session, f"override used: {reason}"
+    return None, reason
 
 
 class RelayWorker:
     """Backend-owned poll loop: independent of dashboard browser clients,
     silent through daemon downtime (the next successful tick resumes), and a
-    no-op unless the relay is explicitly enabled AND a session is named."""
+    no-op unless the relay is explicitly enabled. Destinations are resolved
+    per event; each destination session gets its own debounced batch."""
 
     def __init__(self, poll_seconds: float = RELAY_POLL_SECONDS,
                  debounce_s: float = RELAY_DEBOUNCE_SECONDS):
@@ -1088,23 +1222,24 @@ class RelayWorker:
         self.seen_reports: dict = {}
         self.prev_status: dict = {}
         self.baselined = False
-        self.batcher = RelayBatcher(debounce_s=debounce_s)
+        self.pending: dict = {}  # destination session id -> RelayBatcher
         self.last_error = ""
         self.last_delivery = 0.0
         self.delivered_count = 0
-        self.pending_text: Optional[str] = None
 
     def tick(self, ao, sink) -> bool:
         """One relay tick; False when disabled (the loop then just sleeps)."""
         settings = read_relay_settings()
-        if not settings.enabled or not settings.session_id:
+        if not settings.enabled:
             return False
-        self.poll_once(ao, sink, kinds=settings.events,
-                       session_id=settings.session_id)
+        self.poll_once(ao, sink, settings=settings)
         return True
 
-    def poll_once(self, ao, sink, *, kinds=None, session_id="") -> None:
-        kinds = kinds or set(DEFAULT_RELAY_EVENTS)
+    def poll_once(self, ao, sink, *, settings=None, kinds=None, db="unset") -> None:
+        settings = settings or read_relay_settings()
+        kinds = kinds or settings.events
+        if db == "unset":
+            db = _open_session_db()
         try:
             projects = ao.projects()
             names = {}
@@ -1125,33 +1260,50 @@ class RelayWorker:
         events += session_events(sessions, self.prev_status, kinds)
         if not self.baselined:
             # First successful poll records the daemon's current state only —
-            # enabling the relay must not flood the conversation with history.
+            # enabling the relay must not flood any conversation with history.
             self.baselined = True
             events = []
         for ev in events:
-            self.batcher.add(format_relay_event(ev))
-        self._flush(sink, session_id)
+            dest, reason = resolve_relay_destination(ev.project_id, ao, settings, db)
+            if not dest:
+                # Unmappable (no live orchestrator / ambiguous / no matching
+                # conversation): dropped rather than guessed; the override or
+                # /relay diagnostics is the remedy.
+                self.last_error = f"{ev.kind} for {ev.project_id or '?'} unmapped: {reason}"
+                continue
+            batcher = self.pending.get(dest)
+            if batcher is None:
+                batcher = self.pending[dest] = RelayBatcher(debounce_s=self.debounce_s)
+            batcher.add(format_relay_event(ev))
+        self._flush(sink, settings)
 
-    def _flush(self, sink, session_id: str) -> None:
-        text = self.batcher.flush() if self.batcher.due() else None
-        if not text or not session_id:
-            if text:  # nothing to deliver into yet; keep the batch
-                self.batcher.restore(text)
-            return
-        result = deliver_relay_batch(session_id, text)
-        if result["ok"]:
-            self.last_delivery = time.monotonic()
-            self.delivered_count += 1
-            self.last_error = ""
-            sink(text)
-        elif not result.get("retryable"):
-            # Permanent (store unavailable): drop the batch — retrying forever
-            # would only spin. The /relay status endpoint reports the cause.
-            self.last_error = result.get("error") or "delivery failed"
-        else:
-            # A live turn refused the write: keep the batch for the next tick.
-            self.batcher.restore(text)
-            self.last_error = result.get("error") or "delivery deferred"
+    def _flush(self, sink, settings: RelaySettings) -> None:
+        """Deliver each destination's debounced batch as one live turn."""
+        for dest in list(self.pending):
+            batcher = self.pending[dest]
+            if not batcher.due():
+                continue
+            text = batcher.flush()
+            if not text:
+                self.pending.pop(dest, None)
+                continue
+            result = deliver_relay_batch(dest, text, settings)
+            if result["ok"]:
+                self.last_delivery = time.monotonic()
+                self.delivered_count += 1
+                self.last_error = ""
+                sink(text)
+                self.pending.pop(dest, None)
+            elif not result.get("retryable"):
+                # Permanent (no credential, session gone): drop the batch —
+                # retrying forever would only spin. /relay reports the cause.
+                self.last_error = f"{dest}: {result.get('error') or 'delivery failed'}"
+                self.pending.pop(dest, None)
+            else:
+                # Gateway busy/unreachable (429, 5xx, connection): keep the
+                # batch for the next tick.
+                batcher.restore(text)
+                self.last_error = f"{dest}: {result.get('error') or 'delivery deferred'}"
 
 
 _relay_worker: Optional[RelayWorker] = None
@@ -1160,7 +1312,7 @@ _relay_thread: Optional[threading.Thread] = None
 
 
 def _relay_sink(_text: str) -> None:
-    """Delivery is complete at the store row; nothing further to log at INFO."""
+    """Delivery is complete at the chat-route admission; nothing at INFO."""
 
 
 def _relay_loop() -> None:
@@ -1198,18 +1350,24 @@ def relay_status():
     return {
         "ok": True,
         "enabled": settings.enabled,
-        "session": settings.session_id,
+        "overrideSession": settings.override_session,
+        "apiUrl": settings.api_url,
+        "peer": settings.peer,
+        "credential": ("peer" if settings.peer and _relay_api_key(settings)
+                       else ("api" if _relay_api_key(settings) else "none")),
         "events": sorted(settings.events),
         "watching": worker.baselined,
         "delivered": worker.delivered_count,
+        "pendingDestinations": sorted(worker.pending),
         "lastError": worker.last_error,
     }
 
 
 @router.get("/relay/sessions")
 def relay_session_suggestions():
-    """Recent Hermes sessions of this profile, for picking ``relay_session``.
-    The choice itself stays explicit config — the relay never auto-targets."""
+    """Recent Hermes sessions of this profile, for picking the
+    ``relay_session`` override. The normal destination is resolved from AO's
+    own orchestrator mapping; the override is only for unmappable cases."""
     db = _open_session_db()
     if db is None:
         return {"ok": False, "sessions": [], "error": "Hermes session store unavailable"}

@@ -16,12 +16,12 @@ board refresh itself.
 | **Sends messages to agents** | The **Message** action posts a user-authored message into a running AO session; the agent treats it as user input and acts on it. | Medium. Drives a live agent. |
 | **Local-only network calls** | The backend talks ONLY to the local AO daemon REST API (`http://127.0.0.1:3001` by default, loopback). No secrets are read, no external requests are made. | Low. Local loopback only. |
 | **Reads AO state** | `GET /board` reads the AO daemon's project and session lists and reduces them to board cards. | Low. Read-only. |
-| **Relays AO events into a Hermes conversation** (v0.3.x, **off by default**) | With `relay_enabled: true` AND an explicitly configured `relay_session`, a backend-owned poll loop injects one-line AO worker milestones (report done/checkpoint/stuck/needs-input, working→idle/exited/terminated transitions) into that Hermes session's transcript as durable user-role delivery rows — the same store path Hermes itself uses for async delegation completions (`SessionDB.append_delegation_delivery`). | Medium, opt-in. **The injected row becomes part of that conversation**: the agent sees it on its next turn and may act on it, so a noisy relay makes a noisy agent — the `relay_events` filter and the built-in batch/debounce (one message per burst) exist for this. The row is visible to transcript viewers immediately but does not itself wake an idle session or push onto Telegram/Discord: if the target conversation is bound to a messaging platform, the event surfaces when the session's next turn runs there, not as a proactive platform ping. Delivery credentials and transport are entirely Hermes core — the plugin config holds no secrets. |
+| **Relays AO events into a Hermes conversation** (v0.3.x, **off by default**) | With `relay_enabled: true`, a backend-owned poll loop delivers one-line AO worker milestones (report done/checkpoint/stuck/needs-input, working→idle/exited/terminated transitions) as **live turns** into the destination conversation through the gateway's own api_server session-chat route (`POST /api/sessions/{id}/chat` — the path `hermes peer dm` drives). The destination is resolved **per event** from AO's own orchestrator mapping (the project's live `orchestrator` session, whose Hermes conversation is identified by its `…/worktrees/<project>/orchestrator/` cwd marker); `relay_session` is an explicit override for unmappable cases only. | Medium, opt-in. **A delivered event wakes the destination session and costs it a model turn** — the agent sees the milestone immediately and may act on it; that is the point, and the `relay_events` filter plus the built-in batch/debounce (one turn per burst) exist to keep the cost per burst, not per event. Authenticated with a Hermes-held secret (a named peer's `HERMES_PEER_<NAME>_KEY`, or `API_SERVER_KEY`) — **the plugin config holds no secrets**. The turn runs through Hermes core's own admission path; the relay never talks to a messaging platform directly. |
 
 Nothing here spawns processes itself, touches the filesystem outside the AO
 daemon's own scope, or calls any network host other than the configured local
-AO daemon base URL (the relay writes to Hermes's own session store — the
-dashboard process's own profile home — and nothing else).
+AO daemon base URL — plus, when the relay is enabled, the local gateway
+api_server it delivers through (`relay_api_url`, loopback by default).
 
 ## Screenshots
 
@@ -179,9 +179,9 @@ no secrets.
 
 AO worker milestones — report transitions (`done` / `checkpoint` / `stuck` /
 `needs-input`) and session status transitions (`working` → `idle` / `exited` /
-`terminated`) — can be relayed into one of your Hermes conversations, so they
-reach you wherever that conversation lives instead of only on the
-orchestrator's AO-embedded surface.
+`terminated`) — can be relayed into the owning orchestrator's Hermes
+conversation, so they reach you wherever that conversation lives instead of
+only on the orchestrator's AO-embedded surface.
 
 ```yaml
 plugins:
@@ -189,42 +189,61 @@ plugins:
     ao-bridge:
       settings:
         relay_enabled: true
-        relay_session: local-2a0aee93…   # the Hermes session id to inject into
-        relay_events:                    # optional; omit for all kinds
+        # everything below is optional:
+        relay_events:                    # omit for all kinds
           - report_done
           - report_stuck
           - report_needs_input
+        relay_peer: relaybot             # scoped credential (see below)
+        relay_api_url: http://127.0.0.1:8642
+        relay_session: local-2a0aee93…   # OVERRIDE for unmappable cases only
 ```
 
-- **`relay_session` is deliberate.** The relay never picks a target on its
-  own. `GET /api/plugins/ao-bridge/relay/sessions` lists this profile's
-  recent sessions (id + title + last-active) so you can copy the right id;
-  the choice stays explicit config.
+- **Destination is resolved per event, not configured.** Each event carries
+  its AO project; the relay maps it to that project's live `orchestrator`
+  session (AO REST), then to the orchestrator's Hermes conversation
+  (identified by the `…/worktrees/<project>/orchestrator/` cwd marker on the
+  session — the marker, not the volatile display name). Different workers can
+  belong to different orchestrators and route accordingly. **`relay_session`
+  is an override fallback** for unmappable cases only (no live orchestrator,
+  several sharing a project, no matching conversation) — it never shadows a
+  resolvable mapping.
 - **What arrives.** Compact one-line events, batched: several milestones
   landing within ~5 s share one message (cap 8 lines), e.g.
   `✅ AO my-worker — report done: PR open, CI green` /
   `💤 AO my-worker is idle (was working)`.
-- **How it delivers.** Through Hermes's own session store
-  (`SessionDB.append_delegation_delivery`) — the same durable user-role row an
-  async delegation completion writes. It is visible in the session transcript
-  immediately and folds into the agent's next turn as context. **It is a
-  turn in that conversation**: the agent may act on it — that is the point —
-  and the batch/debounce + `relay_events` filter are how you keep it calm.
-  **It is not a proactive push**: an idle session is not woken, and a
-  Telegram/Discord-bound conversation sees the event on its next turn there,
-  not as a platform ping.
+- **How it delivers — a live wake, not a transcript row.** The batch is
+  submitted as a turn into the destination session through the gateway's own
+  api_server session-chat route (`POST /api/sessions/{id}/chat` — the same
+  sanctioned immediate-submission path `hermes peer dm` drives). The session
+  wakes **immediately** and runs a turn on the milestone; the exchange
+  renders on the surfaces that watch that conversation. **Trade-off, by
+  design:** a delivered event costs the destination session a model turn
+  (even when idle) — that is the price of immediate delivery, and the
+  v0.3.2 alternative (a store row that only landed at the session's next
+  turn) is exactly the "messages arrive only after you message the session"
+  bug class this replaces. Keep it calm with `relay_events` + the built-in
+  batching; there is no separate min-interval knob — the debounce IS the
+  interval.
+- **Credentials stay in Hermes.** The relay authenticates with a Hermes-held
+  secret: a named peer's scoped key (`relay_peer` →
+  `HERMES_PEER_<NAME>_KEY`, resolved through the same secret-scope read
+  `hermes peer` uses; `hermes peer add` registers one), falling back to the
+  gateway's `API_SERVER_KEY`. The plugin config never holds a secret.
 - **Reliability.** The poll loop is backend-owned (independent of dashboard
   browser clients), survives daemon downtime silently, and deduplicates on
   stable report ids so AO's `repeatCount` churn never re-relays the same
-  state. A live turn in the target session briefly refuses inter-turn
-  writes; the batch is kept and retried on the next tick, and delivery stays
-  idempotent (content-stable delegation id).
-- **Diagnostics.** `GET /api/plugins/ao-bridge/relay` reports enabled/target/
-  watched state/delivery count/last error.
+  state. A busy/unreachable gateway (429, 5xx, connection refused) keeps the
+  batch and retries next tick; permanent failures (no credential, session
+  gone) drop it and surface on the diagnostics endpoint.
+- **Diagnostics.** `GET /api/plugins/ao-bridge/relay` reports enabled/
+  override/api URL/credential kind/delivery count/pending destinations/last
+  error. `GET /api/plugins/ao-bridge/relay/sessions` lists recent sessions
+  for picking the override.
 
-No secrets, no platform configuration: relay delivery holds no credentials
-and makes no platform sends — the session's own Hermes transport does any
-platform delivery, exactly as for your own messages in that conversation.
+No platform configuration: the relay makes no platform sends itself — any
+platform delivery is the destination session's own Hermes transport, exactly
+as for your own messages in that conversation.
 
 ## How it differs
 
