@@ -1,5 +1,5 @@
 name: ao-bridge
-version: 0.3.3
+version: 0.3.4
 label: AO Bridge
 description: Agent Orchestrator bridge — a Kanban board over the local AO daemon (projects, sessions, spawn, send)
 author: Wesley Matos
