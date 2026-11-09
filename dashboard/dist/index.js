@@ -578,16 +578,14 @@
   }
 
   // --- Tool executions in the transcript ------------------------------------
-  // Conversation activities (command | mcp_tool | reasoning) interleave with
-  // messages by their shared ``sequence`` number. Kept visually quiet: one
-  // muted line per execution, expandable. ``plan`` activities render in the
-  // Plan panel instead; system/file_change are not part of the transcript.
+  // Conversation activities (command | mcp_tool) interleave with messages by
+  // their shared ``sequence`` number. Kept visually quiet: one muted line per
+  // execution, expandable. ``plan`` activities render in the Plan panel
+  // instead; reasoning gets its own ThinkingRow below; system/file_change are
+  // not part of the transcript.
   function toolStatusGlyph(a) {
     // Wire truth (probed on the live daemon, 2026-11-09): an in-flight command
-    // or tool reports status "pending" (never observed as "running"), while a
-    // reasoning entry stays "running" even after the turn moved on — so
-    // reasoning never gets a spinner.
-    if (a.activityKind === "reasoning") return null;
+    // or tool reports status "pending" (never observed as "running").
     if (a.status === "running" || a.status === "pending")
       return h("span", { className: "ao-tool-spin", title: "running", "aria-label": "running" });
     if (a.status === "failed"
@@ -603,19 +601,16 @@
     const a = props.activity;
     const [open, setOpen] = useState(false);
     const isCmd = a.activityKind === "command";
-    const isReason = a.activityKind === "reasoning";
     const label = isCmd
       ? (a.summary || a.command || "command")
-      : isReason
-        ? "Reasoning"
-        : (a.toolName || a.summary || "tool");
+      : (a.toolName || a.summary || "tool");
     return h("div", { className: "ao-tool-row ao-tool-" + a.activityKind + (open ? " is-open" : "") },
       h("div", {
         className: "ao-tool-head",
         onClick: function () { setOpen(function (p) { return !p; }); },
-        title: isCmd ? (a.command || label) : (isReason ? "Show reasoning" : label),
+        title: isCmd ? (a.command || label) : label,
       },
-        h("span", { className: "ao-tool-glyph" }, isCmd ? "$" : isReason ? "…" : "⚙"),
+        h("span", { className: "ao-tool-glyph" }, isCmd ? "$" : "⚙"),
         h("span", { className: "ao-tool-label" }, label),
         h("span", { className: "ao-tool-tail" },
           toolStatusGlyph(a),
@@ -626,23 +621,66 @@
           ? h("div", { className: "ao-tool-exit" + (a.exitCode ? " is-fail" : "") },
               "exit " + a.exitCode)
           : null,
-        isReason && a.text ? h("div", { className: "ao-tool-reason" }, a.text) : null,
-        !isReason && a.input ? h("pre", { className: "ao-tool-pre" }, a.input) : null,
+        !isCmd && a.input ? h("pre", { className: "ao-tool-pre" }, a.input) : null,
         a.output ? h("pre", { className: "ao-tool-pre" },
-          a.output + (a.outputTruncated ? "\n…" : "")) : null,
-        isReason && a.textTruncated ? h("div", { className: "ao-tool-exit" }, "…truncated") : null
+          a.output + (a.outputTruncated ? "\n…" : "")) : null
+      ) : null
+    );
+  }
+
+  // --- Thinking rows ---------------------------------------------------------
+  // Reasoning activities (activityKind "reasoning") are the worker's private
+  // thinking, not its speech: they render as a clearly SECONDARY muted row —
+  // brain glyph + italic "Thinking" + a one-line preview — collapsed by
+  // default, expandable to the full (still muted, italic) text. Never styled
+  // like a Worker bubble or a tool row. ``live`` is set by the backend on the
+  // single reasoning entry actually being streamed (the last one: mid-turn,
+  // EVERY entry of the current turn reads status "running"), and only that
+  // row pulses. Thinking is worker output, so it hides with the Worker chip
+  // (timelineItems below) rather than having a chip of its own.
+  function ThinkingRow(props) {
+    const a = props.activity;
+    const [open, setOpen] = useState(false);
+    const preview = a.preview || "…";
+    return h("div", {
+      className: "ao-thinking-row" + (a.live ? " is-live" : "") + (open ? " is-open" : ""),
+    },
+      h("div", {
+        className: "ao-thinking-head",
+        onClick: function () { setOpen(function (p) { return !p; }); },
+        title: "Worker thinking — click to " + (open ? "collapse" : "expand"),
+      },
+        h("span", { className: "ao-thinking-glyph", "aria-hidden": true }, "🧠"),
+        h("span", { className: "ao-thinking-label" }, "Thinking"),
+        a.live
+          ? h("span", { className: "ao-thinking-pulse", title: "thinking…",
+                       "aria-label": "thinking" })
+          : null,
+        open
+          ? null
+          : h("span", { className: "ao-thinking-preview", title: preview }, preview),
+        h("span", { className: "ao-tool-caret" }, open ? "▾" : "▸")),
+      open ? h("div", { className: "ao-thinking-body" },
+        a.text ? h("div", { className: "ao-thinking-text" }, a.text) : null,
+        a.textTruncated ? h("div", { className: "ao-tool-exit" }, "…truncated") : null
       ) : null
     );
   }
 
   // Merge transcript messages and tool activities into one sequence-ordered
-  // timeline; message-class filters apply to messages only.
+  // timeline. Message-class filters apply to messages; the one activity kind
+  // that follows them is reasoning: thinking is worker output, so the Worker
+  // chip hides it too (no Thinking chip of its own).
   function timelineItems(transcript, activities, hiddenClasses) {
     const msgs = (transcript || [])
       .filter(function (m) { return !hiddenClasses[messageClass(m)] && bubbleText(m); })
       .map(function (m) { return { kind: "message", seq: m.sequence, item: m }; });
     const acts = (activities || [])
-      .filter(function (a) { return a.activityKind !== "plan"; })
+      .filter(function (a) {
+        if (a.activityKind === "plan") return false;
+        if (a.activityKind === "reasoning" && hiddenClasses.worker) return false;
+        return true;
+      })
       .map(function (a) { return { kind: "activity", seq: a.sequence, item: a }; });
     return msgs.concat(acts).sort(function (x, y) {
       const a = typeof x.seq === "number" ? x.seq : Infinity;
@@ -813,7 +851,9 @@
               ? h("div", { className: "ao-column-empty" }, "Nothing to show in the selected classes")
               : chatItems.map(function (it, i) {
                   if (it.kind === "activity")
-                    return h(ToolRow, { key: "a" + (it.item.id || i), activity: it.item });
+                    return it.item.activityKind === "reasoning"
+                      ? h(ThinkingRow, { key: "a" + (it.item.id || i), activity: it.item })
+                      : h(ToolRow, { key: "a" + (it.item.id || i), activity: it.item });
                   const m = it.item;
                   const cls = messageClass(m);
                   return h("div", { key: "m" + (m.sequence != null ? m.sequence : i), className: "ao-chat-row ao-chat-" + cls },

@@ -3,7 +3,7 @@
   "label": "AO Bridge",
   "description": "Agent Orchestrator board — every AO project and session as a Kanban board: spawn workers, send messages, watch state live",
   "icon": "Columns3",
-  "version": "0.3.7",
+  "version": "0.3.8",
   "tab": {
     "path": "/ao-bridge",
     "position": "after:skills"

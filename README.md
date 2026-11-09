@@ -77,8 +77,19 @@ messages.
 
 ![Card detail sheet](docs/screenshots/ao-bridge-detail.png)
 
-**Tool runs and plans.** The daemon's command, MCP-tool and reasoning
-activities interleave with messages in order, kept visually quiet: one muted
+**Thinking vs speech.** The worker's reasoning activities are not speech —
+they render as a clearly secondary **Thinking** row, never shaped like a
+Worker bubble or a tool run: a small brain glyph, an italic muted
+"Thinking" label and a one-line preview of the thought (~80 characters,
+whitespace collapsed), collapsed by default; click to expand the full text,
+still muted and italic. While a thought is actually being streamed, its row
+pulses — only the last reasoning entry can be live (mid-turn, every entry of
+the running turn reads `running`, so the backend marks liveness, not the
+raw status). Thinking is worker output: it hides and shows with the **Worker**
+chip, and has no filter chip of its own.
+
+**Tool runs and plans.** The daemon's command and MCP-tool activities
+interleave with messages in order, kept visually quiet: one muted
 line per execution with an exit glyph (✓ / ✗ / spinner), click to expand the
 full command, input or output (outputs capped at 4,000 characters, last 400
 activities). The worker's plan renders as a checklist in the sheet and as a

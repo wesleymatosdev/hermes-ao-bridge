@@ -103,7 +103,9 @@ class DetailPayloadExtrasTest(unittest.TestCase):
                          {"id": "", "activityKind": "reasoning", "status": "running",
                           "summary": "Reasoning", "sequence": 2,
                           "text": "huge detail blob that must not ship",
-                          "textTruncated": False})
+                          "textTruncated": False,
+                          "preview": "huge detail blob that must not ship",
+                          "live": True})
 
     def test_detail_activities_bounded_and_summary_only(self):
         self.ao.set_activities("s1", [

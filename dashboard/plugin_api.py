@@ -605,6 +605,18 @@ def _bounded(text: str, limit: int) -> tuple[str, bool]:
     return (text, False) if len(text) <= limit else (text[:limit], True)
 
 
+THINKING_PREVIEW_CHARS = 80
+
+
+def _thinking_preview(text: str) -> str:
+    """One-line collapsed-row preview of a reasoning entry: whitespace
+    (incl. newlines) collapsed, bounded to THINKING_PREVIEW_CHARS."""
+    collapsed = " ".join(text.split())
+    if len(collapsed) <= THINKING_PREVIEW_CHARS:
+        return collapsed
+    return collapsed[:THINKING_PREVIEW_CHARS]
+
+
 def activity_for(act: dict) -> Optional[dict]:
     """Reduce one conversation activity to what the transcript row renders."""
     kind = act.get("activityKind")
@@ -646,15 +658,29 @@ def activity_for(act: dict) -> Optional[dict]:
         text, truncated = _bounded(str(detail.get("text") or ""), TOOL_OUTPUT_MAX_CHARS)
         row["text"] = text
         row["textTruncated"] = truncated
+        row["preview"] = _thinking_preview(text)
     return row
 
 
 def tool_activities(conv: dict) -> dict:
     """Tool-execution activities of a conversation snapshot, sequence-ordered,
-    bounded to the last ACTIVITY_TAIL_COUNT entries."""
+    bounded to the last ACTIVITY_TAIL_COUNT entries.
+
+    Reasoning liveness (wire truth probed on the live daemon, 2026-11-09):
+    while a turn is streaming, EVERY reasoning entry of that turn reports
+    status "running" and only the highest-sequence one is still being written
+    (its ``revision`` bumps) — earlier ones go stale and never flip back
+    until the turn ends. So only the last reasoning entry may carry
+    ``live: true``; the UI pulses just that one.
+    """
     acts = [activity_for(a) for a in (conv.get("activities") or []) if isinstance(a, dict)]
     acts = [a for a in acts if a and a.get("sequence") is not None]
     acts.sort(key=lambda a: a["sequence"])
+    for act in reversed(acts):
+        if act.get("activityKind") == "reasoning":
+            if act.get("status") == "running":
+                act["live"] = True
+            break
     total = len(acts)
     return {"activities": acts[-ACTIVITY_TAIL_COUNT:], "activitiesTotal": total}
 
