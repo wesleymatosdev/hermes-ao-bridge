@@ -479,6 +479,7 @@ def _raise_mapped(err: AOApiError) -> None:
 
 @router.get("/health")
 def health():
+    ensure_relay_started()  # the relay loop arms on first backend traffic
     ao = client()
     daemon: dict = {}
     try:
@@ -491,6 +492,7 @@ def health():
 
 @router.get("/board")
 def board():
+    ensure_relay_started()  # the dashboard polls this constantly; arm the relay here
     ao = client()
     try:
         return board_snapshot(ao)
