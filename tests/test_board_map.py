@@ -115,6 +115,10 @@ class FakeAOFromFixtures(FakeAO):
     def sessions(self):
         return list(self.sessions_by_id.values())
 
+    def conversation(self, session_id):
+        # board_snapshot fetches working sessions' plans; this fixture has none
+        return {}
+
 
 if __name__ == "__main__":
     unittest.main()

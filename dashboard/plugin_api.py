@@ -27,6 +27,8 @@ import hashlib
 import json
 import logging
 import os
+import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -288,12 +290,80 @@ def card_for(session: dict, project_names: dict) -> dict:
     }
 
 
+# ---------------------------------------------------------------------------
+# Plan steps
+#
+# Wire truth (verified against the live daemon, 2026-11-09): the conversation
+# snapshot carries a top-level ``activities`` array; entries with
+# ``activityKind == "plan"`` hold ``detail.steps`` — [{status, text}] with
+# status in in_progress|pending|completed|cancelled — plus ``detail.event``
+# and ``detail.writtenAt``. The LAST plan activity is the live plan and
+# matches the AO desktop app's Plan panel. The sessions list and single-session
+# GETs carry no activities and there is no bulk endpoint, so plans ride the
+# board snapshot from a TTL cache: at most one conversation round-trip per
+# working session per TTL window, never per card per poll.
+# ---------------------------------------------------------------------------
+
+PLAN_TTL_SECONDS = 15.0
+_plan_cache: dict[str, tuple[float, Optional[dict]]] = {}
+_plan_cache_lock = threading.Lock()
+
+PLAN_STEP_STATUSES = ("in_progress", "pending", "completed", "cancelled")
+
+
+def latest_plan(conv: dict) -> Optional[dict]:
+    """Parse the live plan out of a conversation snapshot (or None)."""
+    activities = conv.get("activities")
+    if not isinstance(activities, list):
+        return None
+    for act in reversed(activities):
+        if not isinstance(act, dict) or act.get("activityKind") != "plan":
+            continue
+        detail = act.get("detail") or {}
+        steps = [
+            {"status": st.get("status") if st.get("status") in PLAN_STEP_STATUSES else "pending",
+             "text": st.get("text") or ""}
+            for st in (detail.get("steps") or [])
+            if isinstance(st, dict) and st.get("text")
+        ]
+        return {"steps": steps, "writtenAt": detail.get("writtenAt") or act.get("createdAt") or ""}
+    return None
+
+
+def _attach_plans(cards: list, ao: AOClient) -> None:
+    """Attach ``plan`` to the cards of working sessions, TTL-cached."""
+    working = [c for c in cards if c.get("status") == "working"]
+    now = time.monotonic()
+    for card in working:
+        sid = card["id"]
+        with _plan_cache_lock:
+            hit = _plan_cache.get(sid)
+        if hit and hit[0] > now:
+            if hit[1]:
+                card["plan"] = hit[1]
+            continue
+        try:
+            plan = latest_plan(ao.conversation(sid))
+        except AOApiError:
+            # daemon blip or the session ended mid-fetch: keep the last known plan
+            plan = hit[1] if hit else None
+        with _plan_cache_lock:
+            _plan_cache[sid] = (now + PLAN_TTL_SECONDS, plan)
+        if plan:
+            card["plan"] = plan
+    with _plan_cache_lock:
+        live = {c["id"] for c in working}
+        for sid in [k for k in _plan_cache if k not in live]:
+            del _plan_cache[sid]
+
+
 def board_snapshot(ao: Optional[AOClient] = None) -> dict:
     """One round-trip pair (projects + sessions) reduced to everything the UI draws."""
     ao = ao or client()
     projects = ao.projects()
     project_names = {p.get("id"): (p.get("name") or p.get("id")) for p in projects if p.get("id")}
     cards = [card_for(s, project_names) for s in ao.sessions()]
+    _attach_plans(cards, ao)
     by_column = {c: [] for c in COLUMN_ORDER}
     for card in cards:
         by_column.setdefault(card["column"], []).append(card)
@@ -467,6 +537,7 @@ def detail(session_id: str):
         ],
         "transcriptTotal": len(messages),
         "transcriptTruncated": len(messages) > len(tail),
+        "plan": latest_plan(conv),
     }
 
 

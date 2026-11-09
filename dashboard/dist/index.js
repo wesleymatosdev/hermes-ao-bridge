@@ -136,6 +136,27 @@
     );
   }
 
+  // Live plan (wire truth: last plan activity in the conversation snapshot is
+  // the current plan). The card shows the step being worked on, one line.
+  function planCurrentStep(steps) {
+    for (const st of steps) if (st.status === "in_progress") return st;
+    for (const st of steps) if (st.status === "pending") return st;
+    return null;
+  }
+
+  function PlanLine(props) {
+    const steps = props.plan.steps || [];
+    if (!steps.length) return null;
+    const cur = planCurrentStep(steps);
+    const done = steps.filter(function (s) { return s.status === "completed"; }).length;
+    return h("div", {
+      className: "ao-card-plan",
+      title: steps.map(function (s) { return s.text; }).join("\n"),
+    },
+      h("span", { className: "ao-card-plan-step" }, cur ? cur.text : ""),
+      h("span", { className: "ao-card-plan-count" }, done + "/" + steps.length + " steps"));
+  }
+
   function Card(props) {
     const card = props.card;
     const [busy, setBusy] = useState(null);
@@ -163,6 +184,7 @@
         h("span", { className: "ao-card-age", title: card.createdAt }, timeAgo(card.createdAt))
       ),
       h("div", { className: "ao-card-name", title: card.displayName }, card.displayName),
+      card.plan && card.status === "working" ? h(PlanLine, { plan: card.plan }) : null,
       h("div", { className: "ao-card-meta" },
         h(HarnessChip, { harness: card.harness, iconMap: props.iconMap }),
         h(StatusChip, { displayStatus: card.displayStatus, status: card.status }),
@@ -370,6 +392,9 @@
       });
     }
 
+    // Refetch when the session changes OR when its plan changes on a board
+    // push (plan.writtenAt) — the sheet tracks the live plan like the board does.
+    const planWrittenAt = (session.plan && session.plan.writtenAt) || "";
     useEffect(function () {
       let alive = true;
       setDetail(null); setErr(null);
@@ -377,7 +402,7 @@
         .then(function (d) { if (alive) setDetail(d); })
         .catch(function (e) { if (alive) setErr(parseApiErrorMessage(e)); });
       return function () { alive = false; };
-    }, [session.id]);
+    }, [session.id, planWrittenAt]);
 
     const s = detail && detail.session;
     return h("div", { className: "ao-overlay", onClick: function (e) { if (e.target === e.currentTarget) props.onClose(); } },
@@ -393,6 +418,19 @@
           h("div", { className: "ao-detail-row" }, h("span", { className: "ao-detail-key" }, "Created"), h("span", null, timeAgo(s.createdAt) + (s.createdAt ? " (" + s.createdAt + ")" : ""))),
           h("div", { className: "ao-detail-row" }, h("span", { className: "ao-detail-key" }, "AO link"), h("a", { className: "ao-chip-pr", href: s.aoLink }, s.aoLink))
         ) : null,
+        detail && detail.plan && detail.plan.steps && detail.plan.steps.length
+          ? h("div", { className: "ao-detail-plan" },
+              h("div", { className: "ao-detail-key" }, "Plan" +
+                (detail.plan.writtenAt ? " (updated " + timeAgo(detail.plan.writtenAt) + ")" : "")),
+              h("div", { className: "ao-plan-steps" },
+                detail.plan.steps.map(function (st, i) {
+                  const status = st.status || "pending";
+                  return h("div", { key: i, className: "ao-plan-step ao-plan-" + status.replace("_", "-") },
+                    h("span", { className: "ao-plan-glyph" },
+                      status === "completed" ? "✓" : status === "cancelled" ? "×" : ""),
+                    h("span", { className: "ao-plan-text" }, st.text));
+                })))
+          : null,
         s ? h("div", { className: "ao-detail-transcript" },
           h("div", { className: "ao-detail-key" },
             "Transcript" + (detail.transcriptTruncated ? " (last " + detail.transcript.length + " of " + detail.transcriptTotal + " messages)" : "")),
@@ -436,7 +474,12 @@
     const [refreshedAt, setRefreshedAt] = useState(null);
     const [spawnOpen, setSpawnOpen] = useState(false);
     const [sendTarget, setSendTarget] = useState(null);
-    const [detailTarget, setDetailTarget] = useState(null);
+    const [detailTargetId, setDetailTargetId] = useState(null);
+    // Derive the detail card from the live board so the sheet re-renders (and
+    // refetches, via the plan-writtenAt effect below) on WS pushes.
+    const detailCard = detailTargetId && data
+      ? (data.cards || []).find(function (c) { return c.id === detailTargetId; })
+      : null;
     const [query, setQuery] = useState("");
     const [statusFilter, setStatusFilter] = useState("all");
     const [projectFilter, setProjectFilter] = useState("all");
@@ -669,7 +712,8 @@
                 iconMap: iconMap,
                 collapsed: col.id === "archive" && collapsed,
                 onToggle: col.id === "archive" ? toggleArchive : undefined,
-                onChanged: refresh, onSend: setSendTarget, onOpen: setDetailTarget,
+                onChanged: refresh, onSend: setSendTarget,
+                onOpen: function (card) { setDetailTargetId(card.id); },
               });
             })
           ),
@@ -694,10 +738,10 @@
             onChanged: function () { setSendTarget(null); refresh(); },
           })
         : null,
-      detailTarget
+      detailCard
         ? h(DetailSheet, {
-            session: detailTarget,
-            onClose: function () { setDetailTarget(null); },
+            session: detailCard,
+            onClose: function () { setDetailTargetId(null); },
           })
         : null
     );
