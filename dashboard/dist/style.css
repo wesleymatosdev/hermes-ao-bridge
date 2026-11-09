@@ -229,6 +229,49 @@
 .ao-chip-harness { color: #c4b5fd; border-color: rgba(196, 181, 253, 0.3); }
 .ao-chip-status { color: #dfe3ff; }
 .ao-chip-branch { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+
+/* Honest activity-state chips (v0.5.1): AO's displayStatus nuance moves to
+   the tooltip; the chip itself says what the session is actually doing.
+   Working pulses (the one "active" look), everything else rests. */
+.ao-chip-state-working {
+  color: #6ee7ff;
+  border-color: rgba(110, 231, 255, 0.45);
+  background: rgba(56, 189, 248, 0.10);
+  animation: ao-chip-pulse 1.6s ease-in-out infinite;
+}
+.ao-chip-state-idle {
+  color: #8b93c8;
+  border-color: rgba(139, 147, 200, 0.30);
+  background: rgba(139, 147, 200, 0.08);
+}
+.ao-chip-state-awaiting_pr {
+  color: #fbbf24;
+  border-color: rgba(251, 191, 36, 0.35);
+  background: rgba(251, 191, 36, 0.08);
+}
+.ao-chip-state-archived {
+  color: #6b7196;
+  border-color: rgba(107, 113, 150, 0.30);
+  background: transparent;
+}
+@keyframes ao-chip-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.55; }
+}
+
+/* Counter splits: "2 working · 3 idle" next to the count pill. */
+.ao-column-split,
+.ao-orch-split {
+  font-size: 10.5px;
+  color: var(--ao-text-dim);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ao-column-head .ao-column-split { flex: 1; text-align: right; padding-left: 8px; }
+.ao-orch-split { flex: 1; text-align: right; }
+
 .ao-chip-pr {
   color: #6ee7ff;
   border-color: rgba(110, 231, 255, 0.35);
@@ -318,12 +361,17 @@
   box-shadow: 0 0 8px rgba(56, 189, 248, 0.9);
   animation: ao-orch-pulse 1.6s ease-in-out infinite;
 }
+/* v0.5.1 honest dots: idle is muted gray — green read as "active" for
+   finished sessions. awaiting PR glows amber; archived dims out. */
 .ao-orch-dot-idle {
-  background: var(--ao-good);
-  box-shadow: 0 0 6px rgba(52, 211, 153, 0.55);
+  background: rgba(139, 147, 200, 0.55);
 }
-.ao-orch-dot-inactive {
-  background: rgba(139, 147, 200, 0.45);
+.ao-orch-dot-awaiting_pr {
+  background: #fbbf24;
+  box-shadow: 0 0 6px rgba(251, 191, 36, 0.45);
+}
+.ao-orch-dot-archived {
+  background: rgba(139, 147, 200, 0.30);
 }
 @keyframes ao-orch-pulse {
   0%, 100% { opacity: 1; }

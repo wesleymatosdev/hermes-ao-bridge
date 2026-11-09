@@ -353,6 +353,40 @@ def column_for(session: dict) -> str:
     return "running"
 
 
+# Honest per-session activity state, derived ON TOP of the AO-mirroring board
+# column (column_for keeps mirroring AO; this enum is what the bridge renders):
+#   working      live turn running
+#   idle         alive, no turn
+#   awaiting_pr  work finished, PR not opened yet (AO's displayStatus)
+#   archived     not alive (terminated, or agent process exited)
+SESSION_STATES = ("working", "idle", "awaiting_pr", "archived")
+
+# Field choice verified against the live daemon at 1s resolution (2026-11-09):
+# on both a turn start and a turn end, ``status`` and ``activity.state`` flip
+# in the same poll, so they carry the same truth; ``status == "working"`` is
+# used as the single live-turn signal (it already gates plan attachment).
+
+
+def state_for(session: dict) -> str:
+    """Derive the honest activity state for one AO session.
+
+    Order matters: termination is definitive even when displayStatus lags
+    (a killed "Awaiting PR" session is archived, not awaiting); a live turn
+    outranks every display nuance.
+    """
+    if session.get("isTerminated") or session.get("status") == "terminated":
+        return "archived"
+    if session.get("status") == "working":
+        return "working"
+    if session.get("status") == "exited":
+        # Agent process gone — not alive, so never active even though the
+        # session stays resumable on AO's board.
+        return "archived"
+    if "awaiting pr" in (session.get("displayStatus") or "").lower():
+        return "awaiting_pr"
+    return "idle"
+
+
 def card_for(session: dict, project_names: dict) -> dict:
     """Reduce one AO session to the fields the board card renders."""
     project_id = session.get("projectId") or ""
@@ -374,6 +408,7 @@ def card_for(session: dict, project_names: dict) -> dict:
         "harness": session.get("harness") or "",
         "kind": session.get("kind") or "",
         "column": column_for(session),
+        "state": state_for(session),
         "status": session.get("status") or "",
         "displayStatus": session.get("displayStatus") or "",
         "branch": session.get("branch") or "",

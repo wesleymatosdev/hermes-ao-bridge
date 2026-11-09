@@ -124,9 +124,43 @@
     { id: "all", label: "All time", ms: 0 },
   ];
 
-  // Raw AO statuses that mean "no agent is alive behind this session" — hidden
-  // by the Active-only toggle (archive-column cards are hidden with it too).
-  const INACTIVE_STATUSES = { terminated: true, exited: true };
+  // Honest activity state (v0.5.1): "active" means a live turn, nothing else.
+  // The backend derives card.state; deriveState is the fallback for a stale
+  // backend — plugin_api.py imports once at server startup while this file is
+  // served fresh from disk, so the pair can skew across a plugin update.
+  const STATE_LABELS = {
+    working: "Working", idle: "Idle", awaiting_pr: "Awaiting PR", archived: "Archived",
+  };
+
+  function deriveState(card) {
+    const st = (card.status || "").toLowerCase();
+    if (st === "terminated" || st === "exited") return "archived";
+    if (st === "working") return "working";
+    if ((card.displayStatus || "").toLowerCase().indexOf("awaiting pr") !== -1) return "awaiting_pr";
+    return "idle";
+  }
+
+  function stateOf(card) {
+    return STATE_LABELS[card.state] ? card.state : deriveState(card);
+  }
+
+  // Column/strip counter split, e.g. "2 working · 3 idle" — omitted when every
+  // card is working (the count pill alone then means exactly that).
+  function splitLabel(cards) {
+    if (!cards.length) return "";
+    const counts = {};
+    cards.forEach(function (c) {
+      const s = stateOf(c);
+      counts[s] = (counts[s] || 0) + 1;
+    });
+    const distinct = Object.keys(counts);
+    if (distinct.length === 1 && distinct[0] === "working") return "";
+    const order = ["working", "awaiting_pr", "idle", "archived"];
+    return order
+      .filter(function (s) { return counts[s]; })
+      .map(function (s) { return counts[s] + " " + STATE_LABELS[s].toLowerCase(); })
+      .join(" · ");
+  }
 
   // Always use the local implementation: the host SDK's timeAgo expects a
   // different time format and rendered "NaNd ago" on live cards.
@@ -249,10 +283,16 @@
     blocked: "blocked", done: "done", archive: "archive",
   };
 
+  // Honest per-session state chip — AO's displayStatus rides along as the
+  // tooltip nuance ("Awaiting PR", "Needs review", …).
   function StatusChip(props) {
-    const label = props.displayStatus || props.status;
+    const state = stateOf(props.card);
+    const label = STATE_LABELS[state] || props.card.displayStatus || props.card.status;
     if (!label) return null;
-    return h("span", { className: "ao-chip ao-chip-status" }, label);
+    return h("span", {
+      className: "ao-chip ao-chip-status ao-chip-state-" + state,
+      title: props.card.displayStatus || props.card.status || label,
+    }, label);
   }
 
   function HarnessChip(props) {
@@ -328,7 +368,7 @@
       card.plan && card.status === "working" ? h(PlanLine, { plan: card.plan }) : null,
       h("div", { className: "ao-card-meta" },
         h(HarnessChip, { harness: card.harness, iconMap: props.iconMap }),
-        h(StatusChip, { displayStatus: card.displayStatus, status: card.status }),
+        h(StatusChip, { card: card }),
         card.branch ? h("span", { className: "ao-chip ao-chip-branch", title: card.branch }, card.branch) : null
       ),
       h(PrLinks, { prs: card.prs }),
@@ -364,10 +404,12 @@
 
   function Column(props) {
     const cards = props.cards;
+    const split = splitLabel(cards);
     return h("div", { className: "ao-column ao-column-" + (COLUMN_CLASS[props.id] || "") + (props.collapsed ? " ao-collapsed" : "") },
       h("div", { className: "ao-column-head", onClick: props.onToggle },
         h("span", { className: "ao-column-label" }, props.label),
-        h("span", { className: "ao-column-count" }, cards.length)
+        h("span", { className: "ao-column-count" }, cards.length),
+        split ? h("span", { className: "ao-column-split" }, split) : null
       ),
       props.collapsed
         ? null
@@ -389,17 +431,12 @@
   // the worker cards' filters and open the same detail sheet. Hidden entirely
   // when nothing matches — it never announces an empty section.
 
-  // Liveness bucket for the strip's status dot (and the live-first sort).
-  function orchLiveness(card) {
-    const st = (card.status || "").toLowerCase();
-    if (st === "working") return "working";
-    if (INACTIVE_STATUSES[st]) return "inactive";
-    return "idle";
-  }
-
+  // The strip's status dot follows the honest state enum (not AO's green
+  // alive-dot): working pulses, awaiting PR glows amber, idle sits muted,
+  // archived dims out — same classes the worker cards' chips use.
   function OrchDot(props) {
-    const kind = orchLiveness(props.card);
-    const label = props.card.displayStatus || props.card.status || kind;
+    const kind = stateOf(props.card);
+    const label = STATE_LABELS[kind] || props.card.displayStatus || props.card.status;
     return h("span", {
       className: "ao-orch-dot ao-orch-dot-" + kind,
       title: label,
@@ -409,10 +446,12 @@
 
   function OrchestratorStrip(props) {
     const orchs = props.orchestrators;
+    const split = splitLabel(orchs);
     return h("div", { className: "ao-orch-strip" },
       h("div", { className: "ao-orch-head" },
         h("span", { className: "ao-orch-title" }, "Orchestrators"),
-        h("span", { className: "ao-orch-count" }, orchs.length)),
+        h("span", { className: "ao-orch-count" }, orchs.length),
+        split ? h("span", { className: "ao-orch-split" }, split) : null),
       h("div", { className: "ao-orch-rows" },
         orchs.map(function (c) {
           return h("div", {
@@ -1241,7 +1280,9 @@
           && (c.displayStatus || c.status || "").toLowerCase() !== statusFilter) return false;
       if (projectFilter !== "all" && (c.projectId || "") !== projectFilter) return false;
       if (harnessFilter !== "all" && (c.harness || "").trim() !== harnessFilter) return false;
-      if (activeOnly && (c.column === "archive" || INACTIVE_STATUSES[(c.status || "").toLowerCase()])) return false;
+      // "Active only" means a LIVE TURN — idle sessions (finished agents
+      // still parked on their AO column) are not active and hide with it.
+      if (activeOnly && stateOf(c) !== "working") return false;
       const bucket = RECENCY_OPTIONS.find(function (r) { return r.id === recency; });
       const cutoffMs = bucket && bucket.ms ? Date.now() - bucket.ms : 0;
       if (cutoffMs) {
@@ -1274,12 +1315,12 @@
       const list = (data.orchestrators || (data.cards || []).filter(function (c) {
         return (c.kind || "").toLowerCase() === "orchestrator";
       })).filter(matchesFilters);
-      // Live orchestrators first, then by recency — terminated history sinks
+      // Live orchestrators first, then by recency — archived history sinks
       // to the bottom instead of burying the ones actually coordinating.
       list.sort(function (a, b) {
-        const la = orchLiveness(a), lb = orchLiveness(b);
+        const la = stateOf(a), lb = stateOf(b);
         if (la !== lb) {
-          const order = { working: 0, idle: 1, inactive: 2 };
+          const order = { working: 0, awaiting_pr: 1, idle: 2, archived: 3 };
           return order[la] - order[lb];
         }
         return (b.updatedAt || "").localeCompare(a.updatedAt || "");

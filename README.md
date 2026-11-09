@@ -33,7 +33,7 @@ An **AO Bridge** tab appears in the dashboard.
 
 **The board.** Columns `Queued · Running · Review · Blocked · Done · Archive`,
 mapped from live AO session state (exact rules below). Cards show project,
-session name, harness icon, status, branch, age, and PR links, and working
+session name, harness icon, activity state, branch, age, and PR links, and working
 cards show the worker's current plan step. Spawn workers with the **+ Spawn
 worker** form (project, harness, name, initial prompt), steer and message
 sessions without leaving the board, and archive sessions (with confirmation —
@@ -49,10 +49,22 @@ archiving terminates the session via the daemon).
 | `kanbanColumn: ready`, or displayStatus `Awaiting PR` | Done |
 | `working` / `idle` / `exited` (session alive) | Running |
 
+**AO parity: placement vs activity.** Idle sessions stay on the board — that
+is AO's own model (a finished-but-unarchived worker keeps occupying its
+column), and the bridge deliberately mirrors it: `column_for` decides only
+WHERE a session sits, never whether it is busy. On top of that placement the
+bridge renders an honest activity state per session: **Working** (live turn),
+**Idle** (alive, no turn), **Awaiting PR** (AO's displayStatus), or
+**Archived** (terminated / exited). The card chips, the orchestrator strip's
+dots, and the column-header counters (e.g. "3 working · 2 idle") all speak
+this enum, and the **Active only** toggle keeps only sessions with a live
+turn — an idle "Awaiting PR" card in Done never counts as active.
+
 **Filters.** Text search over project, session name and harness; dropdown
 filters for status, project and harness; a recency selector (last hour / 24h /
 7 days / all time, default 24h); and an **Active only** toggle (default on)
-that hides terminated, exited and archived sessions. All filtering happens in
+that keeps only sessions with a live turn (idle, awaiting-PR, exited and
+archived sessions all hide with it). All filtering happens in
 the browser over the already-fetched board, and the filtered view still
 updates live. Recency, the active toggle, and the Archive column's
 collapse state persist across reloads.
